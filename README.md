@@ -62,6 +62,85 @@
 - `APP_HOST=127.0.0.1`
 - `APP_PORT=8787`
 
+## Docker / 1Panel 部署
+
+项目已提供 Docker 单容器部署配置，适合在 `1Panel` 的 Compose 编排里直接使用。
+
+### 1Panel 推荐方式
+
+1. 在服务器上准备项目目录，例如 `/opt/glm-desk`
+2. 上传或拉取本项目代码到该目录
+3. 在 `1Panel` 中进入 `容器` / `Compose`，选择项目目录里的 `docker-compose.yml`
+4. 首次启动选择构建镜像
+5. 启动后访问 `http://服务器IP:8787`
+
+默认 Compose 会做这些事：
+
+- 构建 Vue 前端并复制到镜像内的 `web/dist`
+- 启动 FastAPI 服务并监听 `0.0.0.0:8787`
+- 安装运行 TDC VM 所需的 `node`
+- 安装 OCR 所需的 Linux 系统库
+- 挂载 `./data:/app/data` 保存账号、会话、日志、二维码任务和 TDC 缓存
+
+### Docker 环境变量
+
+Docker 部署可以参考 `.env.docker.example`。
+
+如果使用 `1Panel` 的 Compose 页面，常用配置直接在环境变量区域填写即可：
+
+```env
+APP_PORT=8787
+TENCENT_OCR_WORKERS=1
+BOOTSTRAP_FINGERPRINT_MAX_RETRIES=99
+RUNTIME_LOG_RETENTION_DAYS=7
+```
+
+说明：
+
+- Docker 内部固定使用 `DATA_DIR=/app/data`
+- Docker 内部固定使用 `APP_HOST=0.0.0.0`
+- Docker 内部固定使用 `TENCENT_CAPTCHA_NODE=node`
+- `TENCENT_OCR_WORKERS` 建议先用 `1`，服务器内存足够再调到 `2-4`
+
+### 命令行启动
+
+如果不用 1Panel，也可以直接运行：
+
+```bash
+docker compose up -d --build
+```
+
+查看日志：
+
+```bash
+docker compose logs -f glm-desk
+```
+
+停止服务：
+
+```bash
+docker compose down
+```
+
+### Docker 数据持久化
+
+Compose 默认挂载：
+
+```text
+./data:/app/data
+```
+
+这个目录必须保留，里面包含：
+
+- `accounts.json`
+- `tasks.json`
+- `sessions/`
+- `logs/runtime/`
+- `tdc_cache/`
+- `cache/`
+
+别把 `data` 当临时目录删了，不然账号和运行记录就没了。
+
 ## 启动进程与 OCR Worker 说明
 
 本项目本地默认通过 [start.bat](E:/开源项目/glmDesk/start.bat) 启动：
