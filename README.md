@@ -90,7 +90,8 @@ Docker 部署可以参考 `.env.docker.example`。
 
 ```env
 APP_PORT=8787
-TENCENT_OCR_WORKERS=1
+TENCENT_OCR_WORKERS=4
+TENCENT_OCR_IDLE_SHRINK_SECONDS=60
 BOOTSTRAP_FINGERPRINT_MAX_RETRIES=99
 RUNTIME_LOG_RETENTION_DAYS=7
 ```
@@ -100,7 +101,8 @@ RUNTIME_LOG_RETENTION_DAYS=7
 - Docker 内部固定使用 `DATA_DIR=/app/data`
 - Docker 内部固定使用 `APP_HOST=0.0.0.0`
 - Docker 内部固定使用 `TENCENT_CAPTCHA_NODE=node`
-- `TENCENT_OCR_WORKERS` 建议先用 `1`，服务器内存足够再调到 `2-4`
+- `TENCENT_OCR_WORKERS` 是 OCR 最大并发上限，4 核 24G 机器可以设为 `4`
+- `TENCENT_OCR_IDLE_SHRINK_SECONDS` 控制 OCR 空闲多久后回收多余 worker，默认 `60` 秒，最少保留 `1` 个热 worker
 
 ### 命令行启动
 
@@ -160,6 +162,8 @@ Compose 默认挂载：
 - 多账号调度是单应用进程里多线程拉任务，真正重 CPU 的 OCR 再交给 OCR 进程池
 - 启动预热阶段现在只主动预热 `1` 个 OCR worker，避免首次下载 RapidOCR 模型时多个进程同时抢同一个 `.onnx` 文件
 - 真正运行时 OCR 并发上限仍然由 `TENCENT_OCR_WORKERS` 控制
+- 当多个账号同时进入验证码 OCR 阶段时，进程池会按排队压力最高扩到 `TENCENT_OCR_WORKERS`
+- 当 OCR 空闲超过 `TENCENT_OCR_IDLE_SHRINK_SECONDS` 后，会自动回收多余 OCR 进程并重新保留 `1` 个热 worker
 
 `TENCENT_OCR_WORKERS` 默认值不是写死 `4`，而是按 CPU 自动算：
 
@@ -478,6 +482,7 @@ TENCENT_OCR_ENABLED=1
 TENCENT_OCR_INCLUDE_DEBUG=0
 TENCENT_OCR_WORKERS=4
 TENCENT_OCR_TIMEOUT_SECONDS=6
+TENCENT_OCR_IDLE_SHRINK_SECONDS=60
 RUNTIME_LOG_LEVEL=INFO
 RUNTIME_LOG_RETENTION_DAYS=7
 ```
@@ -509,8 +514,9 @@ RUNTIME_LOG_RETENTION_DAYS=7
 | `TENCENT_CAPTCHA_NODE` | `node` | 跑腾讯 TDC VM 时使用的 Node.js 命令 |
 | `TENCENT_OCR_ENABLED` | `1` | 是否启用本地 OCR；关闭后自动识别不可用 |
 | `TENCENT_OCR_INCLUDE_DEBUG` | `0` | 是否在 OCR 结果中附带调试图像 base64，开启后日志和响应会更重 |
-| `TENCENT_OCR_WORKERS` | 自动计算，最大不超过 `4` | OCR 进程池并发上限；建议普通机器配 `1-2`，高配机器可配 `3-4` |
+| `TENCENT_OCR_WORKERS` | 自动计算，最大不超过 `4` | OCR 进程池并发上限；多账号同时 OCR 时才会扩到该上限 |
 | `TENCENT_OCR_TIMEOUT_SECONDS` | `6` | 单次 OCR worker 超时秒数 |
+| `TENCENT_OCR_IDLE_SHRINK_SECONDS` | `60` | OCR 空闲多少秒后回收多余 worker，最少保留 `1` 个热 worker |
 | `RUNTIME_LOG_LEVEL` | `INFO` | 正式运行日志级别 |
 | `RUNTIME_LOG_RETENTION_DAYS` | `7` | `app.log` 按天轮转保留天数 |
 
@@ -520,7 +526,7 @@ RUNTIME_LOG_RETENTION_DAYS=7
 - 真正运行时优先用账号自己的 `browser_impersonate`
 - 账号级 `browser_impersonate` 在首次导入账号时随机分配为 `chrome / edge / firefox`
 - `BOOTSTRAP_FINGERPRINT_MAX_RETRIES` 小于 `1` 时会自动按 `1` 处理，避免配置错误导致完全不尝试
-- 如果你把 `TENCENT_OCR_WORKERS` 配得太高，OCR 并发会更猛，但内存占用也会跟着往上窜，别一上来就梭哈
+- 如果你把 `TENCENT_OCR_WORKERS` 配得太高，OCR 并发峰值会更猛，但空闲后会按 `TENCENT_OCR_IDLE_SHRINK_SECONDS` 回收到 `1` 个热 worker
 
 ## 已知说明
 

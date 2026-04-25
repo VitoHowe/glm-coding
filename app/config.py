@@ -41,6 +41,7 @@ class Settings:
     tencent_ocr_include_debug: bool
     tencent_ocr_workers: int
     tencent_ocr_timeout_seconds: int
+    tencent_ocr_idle_shrink_seconds: int
     runtime_log_level: str
     runtime_log_retention_days: int
 
@@ -107,6 +108,13 @@ def get_settings() -> Settings:
         tencent_ocr_timeout_seconds=_parse_int(
             os.getenv("TENCENT_OCR_TIMEOUT_SECONDS", "6"),
             field_name="TENCENT_OCR_TIMEOUT_SECONDS",
+        ),
+        tencent_ocr_idle_shrink_seconds=max(
+            1,
+            _parse_int(
+                os.getenv("TENCENT_OCR_IDLE_SHRINK_SECONDS", "60"),
+                field_name="TENCENT_OCR_IDLE_SHRINK_SECONDS",
+            ),
         ),
         runtime_log_level=os.getenv("RUNTIME_LOG_LEVEL", "INFO").strip() or "INFO",
         runtime_log_retention_days=_parse_int(
