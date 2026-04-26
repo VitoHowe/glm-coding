@@ -7,6 +7,7 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
+  logs: [];
   refresh: [];
   import: [];
 }>();
@@ -21,6 +22,7 @@ const emit = defineEmits<{
       </div>
       <div class="command-actions" :aria-label="copy.app.primaryActionsLabel">
         <n-tag round type="info">{{ health?.transport || copy.app.transportPending }}</n-tag>
+        <n-button secondary @click="emit('logs')">{{ copy.app.viewLogs }}</n-button>
         <n-button secondary @click="emit('refresh')">{{ copy.app.refresh }}</n-button>
         <n-button type="primary" @click="emit('import')">{{ copy.app.importAccount }}</n-button>
       </div>

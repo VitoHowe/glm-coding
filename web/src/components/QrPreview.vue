@@ -21,7 +21,15 @@ function paymentSummary() {
 
 <template>
   <div class="qr-cell">
-    <img v-if="task?.qr_base64" :src="task.qr_base64" :alt="copy.qr.alt" decoding="sync" />
+    <n-image
+      v-if="task?.qr_base64"
+      class="qr-image-preview"
+      :src="task.qr_base64"
+      :preview-src="task.qr_base64"
+      :alt="copy.qr.alt"
+      :width="280"
+      :height="280"
+    />
     <div v-else class="qr-empty">{{ copy.qr.empty }}</div>
     <small v-if="task">{{ paymentSummary() }}</small>
   </div>

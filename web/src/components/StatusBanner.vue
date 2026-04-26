@@ -19,6 +19,15 @@ const emit = defineEmits<{
     role="status"
     @close="emit('close')"
   >
-    {{ banner.text }}
+    <span>{{ banner.text }}</span>
+    <a
+      v-if="banner.linkHref"
+      class="status-banner-link"
+      :href="banner.linkHref"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      {{ banner.linkText || "打开" }}
+    </a>
   </n-alert>
 </template>

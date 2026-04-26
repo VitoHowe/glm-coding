@@ -4,6 +4,7 @@ import type {
   AccountPreferencesPayload,
   ApiResponse,
   HealthPayload,
+  RuntimeLogsPayload,
   PublicAccountRecord
 } from "../types/api";
 
@@ -34,6 +35,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 export const api = {
   health: () => request<HealthPayload>("/healthz"),
+  todayLogs: () => request<RuntimeLogsPayload>("/api/logs/today"),
   listAccounts: () => request<PublicAccountRecord[]>("/api/accounts"),
   getAccount: (accountId: string) => request<AccountDetailResponse>(`/api/accounts/${encodeURIComponent(accountId)}`),
   importAccount: (payload: AccountImportPayload) =>
@@ -57,6 +59,10 @@ export const api = {
     ),
   runAccount: (accountId: string) =>
     request<unknown>(`/api/accounts/${encodeURIComponent(accountId)}/run`, {
+      method: "POST"
+    }),
+  probeAccount: (accountId: string) =>
+    request<unknown>(`/api/accounts/${encodeURIComponent(accountId)}/probe`, {
       method: "POST"
     }),
   pauseAccount: (accountId: string) =>

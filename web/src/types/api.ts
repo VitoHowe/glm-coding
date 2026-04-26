@@ -17,6 +17,15 @@ export interface HealthPayload {
   [key: string]: unknown;
 }
 
+export interface RuntimeLogsPayload {
+  date: string;
+  path: string;
+  lines: string[];
+  text: string;
+  truncated?: boolean;
+  total?: number;
+}
+
 export interface ProductOffer {
   product_id: string;
   product_name: string;
@@ -46,9 +55,12 @@ export interface PublicAccountRecord {
   proxy_url?: string;
   user_agent?: string;
   browser_impersonate?: string;
+  preview_concurrency?: number;
   schedule_enabled?: boolean;
   scheduled_start_time?: string;
   last_scheduled_run_at?: string | null;
+  last_scheduled_run_key?: string;
+  last_manual_run_at?: string | null;
   last_schedule_status?: string;
   last_schedule_message?: string;
   account_status?: string;
@@ -117,6 +129,7 @@ export interface AccountImportPayload {
 export interface AccountPreferencesPayload {
   invitation_code?: string | null;
   selected_product_id?: string | null;
+  preview_concurrency?: number | null;
   schedule_enabled?: boolean | null;
   scheduled_start_time?: string | null;
 }

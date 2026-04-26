@@ -13,6 +13,8 @@ export type BannerTone = "success" | "warning" | "error" | "info";
 export interface StatusBanner {
   tone: BannerTone;
   text: string;
+  linkText?: string;
+  linkHref?: string;
 }
 
 const POLL_INTERVAL_MS = 5000;
@@ -36,8 +38,8 @@ export function useDashboard() {
   );
   const qrTotal = computed(() => details.value.filter(({ tasks }) => Boolean(tasks?.[0]?.qr_base64)).length);
 
-  function setBanner(text: string, tone: BannerTone = "success") {
-    banner.value = { text, tone };
+  function setBanner(text: string, tone: BannerTone = "success", link?: { text: string; href: string }) {
+    banner.value = { text, tone, linkText: link?.text, linkHref: link?.href };
   }
 
   function clearBanner() {
@@ -50,6 +52,14 @@ export function useDashboard() {
       return "";
     }
     return `${detail.account.id}:${task.id || task.biz_id || task.updated_at || ""}`;
+  }
+
+  function qrImageUrl(detail: AccountDetailResponse) {
+    const task = detail.tasks?.[0];
+    if (!task?.id || !task.qr_base64) {
+      return "";
+    }
+    return `/api/accounts/${encodeURIComponent(detail.account.id)}/tasks/${encodeURIComponent(task.id)}/qr.png`;
   }
 
   function applyQrGeneratedReminder(nextDetails: AccountDetailResponse[]) {
@@ -83,7 +93,8 @@ export function useDashboard() {
       newQrDetails.length === 1
         ? copy.feedback.qrGenerated(labels[0], firstTask?.biz_id || "")
         : copy.feedback.qrGeneratedBatch(newQrDetails.length, labels.slice(0, 3).join("、"));
-    setBanner(text, "warning");
+    const qrUrl = newQrDetails.length === 1 ? qrImageUrl(newQrDetails[0]) : "";
+    setBanner(text, "warning", qrUrl ? { text: copy.feedback.openQr, href: qrUrl } : undefined);
     return true;
   }
 
@@ -154,6 +165,10 @@ export function useDashboard() {
     await runAction(`run:${accountId}`, copy.feedback.paymentStarted, () => api.runAccount(accountId));
   }
 
+  async function probeAccount(accountId: string) {
+    await runAction(`probe:${accountId}`, copy.feedback.probeStarted, () => api.probeAccount(accountId));
+  }
+
   async function pauseAccount(accountId: string) {
     await runAction(`pause:${accountId}`, copy.feedback.pauseRequested, () => api.pauseAccount(accountId));
   }
@@ -171,6 +186,7 @@ export function useDashboard() {
     importAccount,
     loading,
     pauseAccount,
+    probeAccount,
     qrTotal,
     refreshDashboard,
     runningTotal,

@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from app.browser_profiles import resolve_transport_impersonate
 from app.config import Settings, get_settings
 from app.errors import UpstreamRequestError
 
@@ -160,7 +161,9 @@ class FingerprintHttpClient:
                     "params": params,
                     "timeout": self.settings.request_timeout_seconds,
                     "allow_redirects": True,
-                    "impersonate": (browser_impersonate or self.settings.browser_impersonate),
+                    "impersonate": resolve_transport_impersonate(
+                        browser_impersonate or self.settings.browser_impersonate,
+                    ),
                 }
                 if json_body is not None:
                     kwargs["json"] = json_body

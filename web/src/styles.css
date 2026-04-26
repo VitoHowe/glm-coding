@@ -119,6 +119,20 @@ textarea:focus-visible,
   box-shadow: 0 10px 28px rgba(15, 23, 42, 0.07);
 }
 
+.status-banner-link {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 10px;
+  color: #7c4a03;
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.status-banner-link:hover {
+  color: #4a2c00;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -325,6 +339,11 @@ textarea:focus-visible,
   font-weight: 600;
 }
 
+.account-state-line {
+  color: var(--desk-ink) !important;
+  font-weight: 700;
+}
+
 .link-button {
   width: fit-content;
   max-width: 100%;
@@ -352,6 +371,30 @@ textarea:focus-visible,
   align-content: center;
 }
 
+.schedule-config {
+  display: grid;
+  gap: 8px;
+}
+
+.preview-race-control {
+  display: grid;
+  grid-template-columns: 1fr 64px;
+  align-items: center;
+  gap: 8px;
+  color: var(--desk-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.preview-race-control select {
+  min-height: 34px;
+  border: 1px solid var(--desk-line);
+  border-radius: 12px;
+  padding: 4px 8px;
+  color: var(--desk-ink);
+  background: #fff;
+}
+
 .time-input {
   min-height: 36px;
   border: 1px solid var(--desk-line);
@@ -359,6 +402,20 @@ textarea:focus-visible,
   padding: 6px 10px;
   color: var(--desk-ink);
   background: #fff;
+}
+
+.schedule-time-readonly {
+  min-height: 36px;
+  display: inline-grid;
+  align-items: center;
+  border: 1px solid #bbf7d0;
+  border-radius: 12px;
+  padding: 6px 10px;
+  color: #166534;
+  background: #f0fdf4;
+  font-family: "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .status-cell {
@@ -379,7 +436,8 @@ textarea:focus-visible,
   background: transparent;
 }
 
-.qr-cell img {
+.qr-cell .n-image,
+.qr-cell .n-image img {
   display: block;
   width: 280px;
   height: 280px;
@@ -388,6 +446,10 @@ textarea:focus-visible,
   border: 0;
   border-radius: 0;
   background: transparent;
+}
+
+.qr-cell .n-image {
+  cursor: zoom-in;
 }
 
 .qr-empty {
@@ -453,6 +515,23 @@ textarea:focus-visible,
 .context-grid strong {
   color: var(--desk-ink);
   word-break: break-word;
+}
+
+.logs-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: var(--desk-muted);
+  font-size: 13px;
+}
+
+.runtime-log-viewer textarea {
+  min-height: calc(100vh - 150px) !important;
+  resize: none !important;
+  white-space: pre;
+  overflow-wrap: normal;
 }
 
 .json-view textarea,

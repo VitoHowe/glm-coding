@@ -6,6 +6,11 @@ export const zhCN = {
     transportPending: "传输状态待确认",
     primaryActionsLabel: "主要操作",
     commandCenterLabel: "GLM Desk 控制中心",
+    viewLogs: "查看日志",
+    logsTitle: "当日运行日志",
+    logsToday: "今日日志",
+    refreshLogs: "刷新日志",
+    noLogs: "今天暂无运行日志",
     refresh: "刷新列表",
     importAccount: "导入账号"
   },
@@ -37,7 +42,9 @@ export const zhCN = {
     noRecentEvent: "暂无最近事件",
     run: "启动",
     pause: "暂停",
+    probe: "测活",
     bizId: "bizId",
+    previewConcurrency: "Preview 并发",
     scheduleState: "定时",
     scheduleEnabled: "已启用",
     scheduleDisabled: "未启用",
@@ -87,7 +94,9 @@ export const zhCN = {
     accountSynced: "账号已同步并更换指纹",
     accountDeleted: "账号已删除",
     paymentStarted: "支付流程已启动",
+    probeStarted: "测活任务已启动",
     pauseRequested: "已请求暂停",
+    openQr: "打开二维码",
     qrGenerated: (label: string, bizId: string) =>
       `账号 ${label} 已生成支付二维码${bizId ? `，bizId: ${bizId}` : ""}`,
     qrGeneratedBatch: (count: number, labels: string) => `${count} 个账号已生成支付二维码：${labels}`
