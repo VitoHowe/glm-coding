@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import logging
+import threading
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from io import BytesIO
@@ -13,6 +15,7 @@ import qrcode
 
 from app.clients.bigmodel_client import BigModelClient, get_bigmodel_client
 from app.clients.tencent_captcha_client import TencentCaptchaClient, get_tencent_captcha_client
+from app.config import get_settings
 from app.errors import BadRequestError, GlmDeskError, UpstreamRequestError
 from app.models import (
     AccountDetailResponse,
@@ -49,6 +52,20 @@ class StaticProduct:
     sale_price: str
     plan_type: str
     version: str = "v2"
+
+
+@dataclass(frozen=True)
+class PreviewRaceWinner:
+    """Winning isolated preview attempt result."""
+
+    preview: PreviewResult
+    ticket: str
+    randstr: str
+    round: int
+    lane: int
+
+
+PREVIEW_RACE_MAX_ROUNDS = 999
 
 
 STATIC_PRODUCTS: tuple[StaticProduct, ...] = (
@@ -92,6 +109,7 @@ class PaymentService:
         self.ocr_service = ocr_service or get_ocr_service()
         self.tdc_service = tdc_service or get_tdc_service()
         self.runtime_logs = runtime_log_service or get_runtime_log_service()
+        self.settings = get_settings()
 
     def health_payload(self) -> dict[str, Any]:
         return {
@@ -131,111 +149,160 @@ class PaymentService:
                 action="bootstrap_account",
                 source="refresh_fingerprint" if refresh_fingerprint else "manual",
             )
-        try:
-            if refresh_fingerprint:
-                rotated = self.state_service.rotate_browser_impersonate(account_id)
-                self.runtime_logs.log_event(
-                    flow,
-                    stage="fingerprint",
-                    status="rotated",
-                    message="账号指纹已刷新",
-                    details={"browser_impersonate": rotated.browser_impersonate},
+        assert flow is not None
+        max_attempts = self.settings.bootstrap_fingerprint_max_retries if refresh_fingerprint else 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                detail = self._bootstrap_account_once(
+                    account_id,
+                    refresh_fingerprint=refresh_fingerprint,
+                    flow=flow,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
                 )
-            account = self.state_service.get_account(account_id)
-            session = self.state_service.load_session(account_id)
+                if own_flow:
+                    self.runtime_logs.finish_run(
+                        flow,
+                        status="success",
+                        message="账号同步完成",
+                        details={
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "product_count": len(detail.session.products),
+                            "selected_product_id": detail.session.selected_product_id,
+                            "purchase_mode": detail.session.purchase_mode,
+                        },
+                    )
+                return detail
+            except Exception as exc:
+                if attempt < max_attempts:
+                    self.runtime_logs.log_event(
+                        flow,
+                        stage="bootstrap_retry",
+                        status="retry",
+                        message=f"账号同步失败，准备更换指纹重试（{attempt}/{max_attempts}）：{exc}",
+                        details={
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "error": exc.__class__.__name__,
+                        },
+                        level=logging.WARNING,
+                    )
+                    continue
+                account = self.state_service.get_account(account_id)
+                account.account_status = "error"
+                account.account_status_message = str(exc)
+                account.account_checked_at = utc_now_iso()
+                self.state_service.update_account(account)
+                if own_flow:
+                    self.runtime_logs.finish_run(
+                        flow,
+                        status="failed",
+                        message=f"账号同步失败：{exc}",
+                        details={
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "error": exc.__class__.__name__,
+                        },
+                        level=logging.ERROR,
+                    )
+                raise
+        raise RuntimeError("bootstrap retry loop exited unexpectedly")
 
+    def _bootstrap_account_once(
+        self,
+        account_id: str,
+        *,
+        refresh_fingerprint: bool,
+        flow: FlowRun,
+        attempt: int,
+        max_attempts: int,
+    ) -> AccountDetailResponse:
+        if refresh_fingerprint:
+            rotated = self.state_service.rotate_browser_impersonate(account_id)
             self.runtime_logs.log_event(
                 flow,
-                stage="get_customer_info",
-                status="started",
-                message="开始同步账号上下文",
-                details={"browser_impersonate": account.browser_impersonate},
-            )
-            user_info_result = self.bigmodel_client.get_customer_info(account, session)
-            user_info = self._ensure_dict(user_info_result.data, label="getCustomerInfo.data")
-            organizations = self._extract_organizations(user_info)
-            org_id, project_id = self._choose_org_and_project(
-                organizations=organizations,
-                preferred_org_id=account.org_id or session.org_id,
-                preferred_project_id=account.project_id or session.project_id,
-            )
-
-            session.org_id = org_id
-            session.project_id = project_id
-            session.customer_number = str(user_info.get("customerNumber") or "")
-            session.customer_name = str(user_info.get("customerName") or "")
-            session.user_info = user_info
-            session.organizations = organizations
-
-            if not session.customer_number:
-                raise UpstreamRequestError(
-                    "getCustomerInfo 没返回 customerNumber，后面 create-sign 根本没法拼。",
-                    details={"payload": user_info_result.raw},
-                )
-
-            self.runtime_logs.log_event(
-                flow,
-                stage="get_customer_info",
-                status="success",
-                message="账号上下文同步成功",
+                stage="fingerprint",
+                status="rotated",
+                message="账号指纹已刷新",
                 details={
-                    "customer_number": session.customer_number,
-                    "customer_name": session.customer_name,
-                    "org_id": org_id,
-                    "project_id": project_id,
-                    "organization_count": len(organizations),
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "browser_impersonate": rotated.browser_impersonate,
                 },
             )
+        account = self.state_service.get_account(account_id)
+        session = self.state_service.load_session(account_id)
 
-            account.org_id = org_id
-            account.project_id = project_id
-            account.last_bootstrap_at = utc_now_iso()
-            self.state_service.update_account(account)
+        self.runtime_logs.log_event(
+            flow,
+            stage="get_customer_info",
+            status="started",
+            message="开始同步账号上下文",
+            details={
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "browser_impersonate": account.browser_impersonate,
+            },
+        )
+        user_info_result = self.bigmodel_client.get_customer_info(account, session)
+        user_info = self._ensure_dict(user_info_result.data, label="getCustomerInfo.data")
+        organizations = self._extract_organizations(user_info)
+        org_id, project_id = self._choose_org_and_project(
+            organizations=organizations,
+            preferred_org_id=account.org_id or session.org_id,
+            preferred_project_id=account.project_id or session.project_id,
+        )
 
-            products = self.load_products(
-                account_id,
-                invitation_code=account.invitation_code,
-                account=account,
-                session=session,
-                flow=flow,
+        session.org_id = org_id
+        session.project_id = project_id
+        session.customer_number = str(user_info.get("customerNumber") or "")
+        session.customer_name = str(user_info.get("customerName") or "")
+        session.user_info = user_info
+        session.organizations = organizations
+
+        if not session.customer_number:
+            raise UpstreamRequestError(
+                "getCustomerInfo 没返回 customerNumber，后面 create-sign 根本没法拼。",
+                details={"payload": user_info_result.raw},
             )
-            session.products = products
-            if not session.selected_product_id:
-                session.selected_product_id = DEFAULT_PRODUCT_ID
-            self.state_service.save_session(session)
-            account = self.state_service.get_account(account_id)
-            account.account_status = "valid"
-            account.account_status_message = "同步上下文和套餐成功"
-            account.account_checked_at = utc_now_iso()
-            self.state_service.update_account(account)
-            detail = self.state_service.get_account_detail(account_id)
-            if own_flow:
-                self.runtime_logs.finish_run(
-                    flow,
-                    status="success",
-                    message="账号同步完成",
-                    details={
-                        "product_count": len(products),
-                        "selected_product_id": detail.session.selected_product_id,
-                        "purchase_mode": detail.session.purchase_mode,
-                    },
-                )
-            return detail
-        except Exception as exc:
-            account = self.state_service.get_account(account_id)
-            account.account_status = "error"
-            account.account_status_message = str(exc)
-            account.account_checked_at = utc_now_iso()
-            self.state_service.update_account(account)
-            if own_flow:
-                self.runtime_logs.finish_run(
-                    flow,
-                    status="failed",
-                    message=f"账号同步失败：{exc}",
-                    details={"error": exc.__class__.__name__},
-                    level=logging.ERROR,
-                )
-            raise
+
+        self.runtime_logs.log_event(
+            flow,
+            stage="get_customer_info",
+            status="success",
+            message="账号上下文同步成功",
+            details={
+                "customer_number": session.customer_number,
+                "customer_name": session.customer_name,
+                "org_id": org_id,
+                "project_id": project_id,
+                "organization_count": len(organizations),
+            },
+        )
+
+        account.org_id = org_id
+        account.project_id = project_id
+        account.last_bootstrap_at = utc_now_iso()
+        self.state_service.update_account(account)
+
+        products = self.load_products(
+            account_id,
+            invitation_code=account.invitation_code,
+            account=account,
+            session=session,
+            flow=flow,
+        )
+        session.products = products
+        if not session.selected_product_id:
+            session.selected_product_id = DEFAULT_PRODUCT_ID
+        self.state_service.save_session(session)
+        account = self.state_service.get_account(account_id)
+        account.account_status = "valid"
+        account.account_status_message = "同步上下文和套餐成功"
+        account.account_checked_at = utc_now_iso()
+        self.state_service.update_account(account)
+        return self.state_service.get_account_detail(account_id)
 
     def load_products(
         self,
@@ -385,6 +452,58 @@ class PaymentService:
                 )
             raise
 
+    def _fetch_captcha_challenge_for_session(
+        self,
+        account: AccountRecord,
+        session: AccountSessionState,
+        *,
+        analyze: bool = True,
+        flow: FlowRun | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        challenge = self.tencent_captcha_client.prehandle(account)
+        image_bytes = self.tencent_captcha_client.fetch_image_bytes(account, challenge)
+        payload: dict[str, Any] = {
+            "instruction": challenge.instruction,
+            "sess": challenge.sess,
+            "sid": challenge.sid,
+            "image_url": challenge.image_url,
+            "image_path": challenge.image_path,
+            "image_size": len(image_bytes),
+            "image_base64": "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii"),
+            "raw": challenge.raw,
+        }
+        if analyze:
+            payload["ocr"] = self.ocr_service.analyze_captcha_image(
+                image_bytes,
+                prompt_text=challenge.instruction,
+            )
+        self.captcha_service.store_challenge_snapshot(
+            session,
+            sess=challenge.sess,
+            sid=challenge.sid,
+            instruction=challenge.instruction,
+            raw=challenge.raw,
+            ocr=payload.get("ocr") if isinstance(payload.get("ocr"), dict) else None,
+        )
+        ocr = payload.get("ocr") if isinstance(payload.get("ocr"), dict) else {}
+        self.runtime_logs.log_event(
+            flow,
+            stage="captcha_challenge",
+            status="success",
+            message="验证码图片获取成功",
+            details={
+                **(details or {}),
+                "instruction": challenge.instruction,
+                "image_size": len(image_bytes),
+                "ocr_points": len(ocr.get("points") or []) if isinstance(ocr.get("points"), list) else 0,
+                "ocr_confidence": ocr.get("confidence"),
+                "worker_pid": ocr.get("_worker_pid"),
+                "worker_elapsed_ms": ocr.get("_worker_elapsed_ms"),
+            },
+        )
+        return payload
+
     def build_captcha_verify_payload(
         self,
         account_id: str,
@@ -415,9 +534,31 @@ class PaymentService:
         own_flow = flow is None
         if own_flow:
             flow = self.runtime_logs.start_run(account_id=account_id, action="captcha_verify")
+        account = self.state_service.get_account(account_id)
+        session = self.state_service.load_session(account_id)
+        return self._submit_captcha_verify_for_session(
+            account_id,
+            account,
+            session,
+            request,
+            flow=flow,
+            persist_session=True,
+            finish_own_flow=own_flow,
+        )
+
+    def _submit_captcha_verify_for_session(
+        self,
+        account_id: str,
+        account: AccountRecord,
+        session: AccountSessionState,
+        request: CaptchaVerifyPayloadRequest,
+        *,
+        flow: FlowRun | None = None,
+        persist_session: bool = False,
+        finish_own_flow: bool = False,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         try:
-            account = self.state_service.get_account(account_id)
-            session = self.state_service.load_session(account_id)
             request, tdc_result = self._hydrate_tdc_if_needed(account, session, request)
             bundle = self.captcha_service.build_verify_payload(session, request)
             bundle["challenge"] = {
@@ -441,7 +582,8 @@ class PaymentService:
                 session.captcha_ticket = ""
                 session.captcha_randstr = ""
                 session.captcha_updated_at = None
-            self.state_service.save_session(session)
+            if persist_session:
+                self.state_service.save_session(session)
 
             response = {
                 "request": bundle,
@@ -459,6 +601,7 @@ class PaymentService:
                 status="success" if verify_ok else "failed",
                 message="验证码 verify 完成" if verify_ok else "验证码 verify 未通过",
                 details={
+                    **(details or {}),
                     "ret": verify_result.ret,
                     "error_code": verify_result.error_code,
                     "error_message": verify_result.error_message,
@@ -467,7 +610,7 @@ class PaymentService:
                 },
                 level=logging.INFO if verify_ok else logging.WARNING,
             )
-            if own_flow:
+            if finish_own_flow:
                 self.runtime_logs.finish_run(
                     flow,
                     status="success" if verify_ok else "failed",
@@ -477,7 +620,7 @@ class PaymentService:
                 )
             return response
         except Exception as exc:
-            if own_flow:
+            if finish_own_flow:
                 self.runtime_logs.finish_run(
                     flow,
                     status="failed",
@@ -491,26 +634,59 @@ class PaymentService:
         own_flow = flow is None
         if own_flow:
             flow = self.runtime_logs.start_run(account_id=account_id, action="solve_captcha")
+        account = self.state_service.get_account(account_id)
+        session = self.state_service.load_session(account_id)
+        return self._solve_captcha_for_session(
+            account_id,
+            account,
+            session,
+            flow=flow,
+            persist_session=True,
+            finish_own_flow=own_flow,
+        )
+
+    def _solve_captcha_for_session(
+        self,
+        account_id: str,
+        account: AccountRecord,
+        session: AccountSessionState,
+        *,
+        flow: FlowRun | None = None,
+        persist_session: bool = False,
+        finish_own_flow: bool = False,
+        stop_event: threading.Event | None = None,
+        details: dict[str, Any] | None = None,
+        push_progress: bool = True,
+    ) -> dict[str, Any]:
         attempts: list[dict[str, Any]] = []
         last_result: dict[str, Any] = {}
         attempt = 0
         try:
             while True:
                 self._ensure_not_paused(account_id)
+                if stop_event is not None and stop_event.is_set():
+                    raise RunPausedError("preview race 已有其他任务胜出")
                 attempt += 1
-                self._push_runtime_message(
-                    account_id,
-                    f"正在识别验证码，第 {attempt} 轮",
-                )
+                if push_progress:
+                    self._push_runtime_message(
+                        account_id,
+                        f"正在识别验证码，第 {attempt} 轮",
+                    )
                 self.runtime_logs.log_event(
                     flow,
                     stage="captcha_attempt",
                     status="started",
                     message=f"开始第 {attempt} 轮验证码识别",
-                    details={"attempt": attempt},
+                    details={"attempt": attempt, **(details or {})},
                 )
                 try:
-                    challenge = self.fetch_captcha_challenge(account_id, analyze=True, flow=flow)
+                    challenge = self._fetch_captcha_challenge_for_session(
+                        account,
+                        session,
+                        analyze=True,
+                        flow=flow,
+                        details={"attempt": attempt, **(details or {})},
+                    )
                 except GlmDeskError as exc:
                     result = {
                         "attempt": attempt,
@@ -535,10 +711,11 @@ class PaymentService:
                         details={"attempt": attempt, "error": exc.message, "details": exc.details},
                         level=logging.WARNING,
                     )
-                    self._push_runtime_message(
-                        account_id,
-                        f"验证码 OCR 异常，第 {attempt} 轮重试中",
-                    )
+                    if push_progress:
+                        self._push_runtime_message(
+                            account_id,
+                            f"验证码 OCR 异常，第 {attempt} 轮重试中",
+                        )
                     continue
                 ocr_gate = self._captcha_ocr_gate(challenge)
                 if not ocr_gate["usable"]:
@@ -565,13 +742,27 @@ class PaymentService:
                         details={"attempt": attempt, **ocr_gate},
                         level=logging.WARNING,
                     )
-                    self._push_runtime_message(
-                        account_id,
-                        f"验证码点位不足或不匹配，第 {attempt} 轮重试中",
-                    )
+                    if push_progress:
+                        self._push_runtime_message(
+                            account_id,
+                            f"验证码点位不足或不匹配，第 {attempt} 轮重试中",
+                        )
                     continue
 
-                verify = self.submit_captcha_verify(account_id, CaptchaVerifyPayloadRequest(), flow=flow)
+                if stop_event is not None and stop_event.is_set():
+                    raise RunPausedError("preview race 已有其他任务胜出")
+
+                verify = self._submit_captcha_verify_for_session(
+                    account_id,
+                    account,
+                    session,
+                    CaptchaVerifyPayloadRequest(),
+                    flow=flow,
+                    persist_session=persist_session,
+                    details={"attempt": attempt, **(details or {})},
+                )
+                if stop_event is not None and stop_event.is_set():
+                    raise RunPausedError("preview race 已有其他任务胜出")
                 error_code = str(verify.get("error_code") or "")
                 result = {
                     "attempt": attempt,
@@ -595,10 +786,11 @@ class PaymentService:
                         details={"attempt": attempt, "error_code": error_code},
                         level=logging.WARNING,
                     )
-                    self._push_runtime_message(
-                        account_id,
-                        f"验证码 verify 返回 error=50，第 {attempt} 轮重试中",
-                    )
+                    if push_progress:
+                        self._push_runtime_message(
+                            account_id,
+                            f"验证码 verify 返回 error=50，第 {attempt} 轮重试中",
+                        )
                     continue
                 if (error_code and error_code != "0") or not result["ticket"] or not result["randstr"]:
                     result["ticket"] = ""
@@ -618,10 +810,11 @@ class PaymentService:
                         },
                         level=logging.WARNING,
                     )
-                    self._push_runtime_message(
-                        account_id,
-                        f"验证码 verify 未通过，第 {attempt} 轮重试中",
-                    )
+                    if push_progress:
+                        self._push_runtime_message(
+                            account_id,
+                            f"验证码 verify 未通过，第 {attempt} 轮重试中",
+                        )
                     continue
                 attempts.append(result)
                 last_result = result
@@ -632,15 +825,16 @@ class PaymentService:
                     message="验证码识别成功",
                     details={"attempt": attempt, "ticket_ready": True, "randstr_ready": True},
                 )
-                self._push_runtime_message(
-                    account_id,
-                    f"验证码识别成功，共尝试 {attempt} 轮",
-                )
+                if push_progress:
+                    self._push_runtime_message(
+                        account_id,
+                        f"验证码识别成功，共尝试 {attempt} 轮",
+                    )
                 solved = {
                     **result,
                     "attempts": attempts,
                 }
-                if own_flow:
+                if finish_own_flow:
                     self.runtime_logs.finish_run(
                         flow,
                         status="success",
@@ -649,7 +843,7 @@ class PaymentService:
                     )
                 return solved
         except Exception as exc:
-            if own_flow:
+            if finish_own_flow:
                 self.runtime_logs.finish_run(
                     flow,
                     status="failed",
@@ -696,8 +890,8 @@ class PaymentService:
                     flow,
                     stage="preview",
                     status="started",
-                    message=f"开始第 {preview_round} 轮 preview",
-                    details={"round": preview_round, "product_id": request.product_id},
+                    message=f"开始第 {preview_round} 轮 preview，将先获取验证码票据",
+                    details={"round": preview_round, "product_id": request.product_id, "captcha_required": True},
                 )
                 captcha_request = request if preview_round == 1 else request.model_copy(update={"ticket": None, "randstr": None})
                 ticket, randstr = self._resolve_or_solve_preview_captcha(account_id, session, captcha_request, flow=flow)
@@ -728,7 +922,7 @@ class PaymentService:
                         flow,
                         stage="preview",
                         status="retry",
-                        message="preview 请求失败，重新开始整条链路",
+                        message="preview 请求失败，下一轮将重新获取验证码票据并再次请求 preview",
                         details={"round": preview_round, "error": exc.message, "details": exc.details},
                         level=logging.WARNING,
                     )
@@ -808,7 +1002,7 @@ class PaymentService:
                     flow,
                     stage="preview",
                     status="retry",
-                    message="preview 未拿到 bizId，重跑整条链路",
+                    message="preview 未拿到 bizId，下一轮将重新获取验证码票据并再次请求 preview",
                     details={
                         "round": preview_round,
                         "code": code,
@@ -833,6 +1027,269 @@ class PaymentService:
                     level=logging.ERROR,
                 )
             raise
+
+    def race_preview_payment(
+        self,
+        account_id: str,
+        request: PreviewPaymentRequest,
+        *,
+        concurrency: int = 1,
+        flow: FlowRun | None = None,
+    ) -> PreviewResult:
+        normalized_concurrency = max(1, min(4, int(concurrency or 1)))
+        own_flow = flow is None
+        if own_flow:
+            flow = self.runtime_logs.start_run(
+                account_id=account_id,
+                action="preview_payment_race",
+                product_id=request.product_id,
+                details={"concurrency": normalized_concurrency},
+            )
+        capacity_lease_id = ""
+        capacity = self.ocr_service.reserve_capacity(normalized_concurrency)
+        capacity_lease_id = str(capacity.get("lease_id") or "")
+        self.runtime_logs.log_event(
+            flow,
+            stage="ocr_capacity",
+            status="ready",
+            message="OCR worker 已按 preview 并发需求预热",
+            details={
+                "preview_concurrency": normalized_concurrency,
+                "reserved_demand": capacity.get("reserved_demand"),
+                "active_demand": capacity.get("active_demand"),
+                "workers_limit": capacity.get("workers"),
+                "warmed_workers": capacity.get("warmed_workers"),
+                "warmed_worker_pids": capacity.get("warmed_worker_pids"),
+            },
+        )
+        if normalized_concurrency <= 1:
+            try:
+                return self.preview_payment(account_id, request, flow=flow)
+            finally:
+                self.ocr_service.release_capacity(capacity_lease_id)
+
+        try:
+            account, base_session = self._ensure_context(account_id)
+        except Exception:
+            self.ocr_service.release_capacity(capacity_lease_id)
+            raise
+        invitation = (request.invitation_code or account.invitation_code).strip()
+        stop_event = threading.Event()
+        errors: list[str] = []
+        self.runtime_logs.log_event(
+            flow,
+            stage="preview_race",
+            status="started",
+            message=f"preview 竞速启动，并发 {normalized_concurrency} 路",
+            details={"concurrency": normalized_concurrency, "product_id": request.product_id},
+        )
+        self._push_runtime_message(
+            account_id,
+            f"正在并发获取 bizId，preview 并发 {normalized_concurrency} 路",
+        )
+        try:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=normalized_concurrency,
+                thread_name_prefix=f"preview-race-{account_id}",
+            )
+            try:
+                futures = [
+                    executor.submit(
+                        self._preview_race_lane,
+                        account_id,
+                        account,
+                        base_session,
+                        request,
+                        invitation,
+                        lane,
+                        stop_event,
+                        flow,
+                    )
+                    for lane in range(1, normalized_concurrency + 1)
+                ]
+                self.runtime_logs.log_event(
+                    flow,
+                    stage="preview_race",
+                    status="started",
+                    message=f"preview 竞速已提交 {len(futures)} 个并发 lane",
+                    details={
+                        "concurrency": normalized_concurrency,
+                        "max_rounds_per_lane": PREVIEW_RACE_MAX_ROUNDS,
+                    },
+                )
+                winner: PreviewRaceWinner | None = None
+                paused_error: RunPausedError | None = None
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        winner = future.result()
+                    except RunPausedError as exc:
+                        if not stop_event.is_set():
+                            paused_error = exc
+                            stop_event.set()
+                            for item in futures:
+                                if item is not future:
+                                    item.cancel()
+                        continue
+                    except Exception as exc:
+                        errors.append(str(exc))
+                        continue
+                    stop_event.set()
+                    for item in futures:
+                        if item is not future:
+                            item.cancel()
+                    break
+            finally:
+                stop_event.set()
+                executor.shutdown(wait=False, cancel_futures=True)
+
+            if winner is None:
+                if paused_error is not None:
+                    raise paused_error
+                message = errors[-1] if errors else "preview 竞速没有拿到 bizId"
+                raise UpstreamRequestError(
+                    "preview 竞速失败，所有并发任务都未拿到 bizId",
+                    details={"concurrency": normalized_concurrency, "last_error": message, "errors": errors[-6:]},
+                )
+
+            session = self.state_service.load_session(account_id)
+            session.selected_product_id = request.product_id
+            session.preview = winner.preview
+            session.captcha_ticket = winner.ticket
+            session.captcha_randstr = winner.randstr
+            self.state_service.save_session(session)
+            self.runtime_logs.log_event(
+                flow,
+                stage="preview_race",
+                status="success",
+                message="preview 竞速成功，已选用最先返回 bizId 的结果",
+                details={
+                    "concurrency": normalized_concurrency,
+                    "lane": winner.lane,
+                    "round": winner.round,
+                    "biz_id": winner.preview.biz_id,
+                },
+            )
+            self._push_runtime_message(
+                account_id,
+                f"preview 竞速成功，lane {winner.lane} 获取 bizId：{winner.preview.biz_id}",
+            )
+            if own_flow:
+                self.runtime_logs.finish_run(
+                    flow,
+                    status="success",
+                    message="preview 竞速成功",
+                    details={"biz_id": winner.preview.biz_id, "lane": winner.lane, "round": winner.round},
+                )
+            return winner.preview
+        except Exception as exc:
+            stop_event.set()
+            if own_flow:
+                self.runtime_logs.finish_run(
+                    flow,
+                    status="failed",
+                    message=f"preview 竞速失败：{exc}",
+                    details={"error": exc.__class__.__name__},
+                    level=logging.ERROR,
+                )
+            raise
+        finally:
+            self.ocr_service.release_capacity(capacity_lease_id)
+
+    def _preview_race_lane(
+        self,
+        account_id: str,
+        account: AccountRecord,
+        base_session: AccountSessionState,
+        request: PreviewPaymentRequest,
+        invitation: str,
+        lane: int,
+        stop_event: threading.Event,
+        flow: FlowRun | None,
+    ) -> PreviewRaceWinner:
+        session = base_session.model_copy(deep=True)
+        round_no = 0
+        while not stop_event.is_set() and round_no < PREVIEW_RACE_MAX_ROUNDS:
+            self._ensure_not_paused(account_id)
+            round_no += 1
+            details = {"lane": lane, "round": round_no, "race": True}
+            self.runtime_logs.log_event(
+                flow,
+                stage="preview_race",
+                status="started",
+                message=f"preview 竞速 lane {lane} 开始第 {round_no} 轮",
+                details=details,
+            )
+            solved = self._solve_captcha_for_session(
+                account_id,
+                account,
+                session,
+                flow=flow,
+                persist_session=False,
+                stop_event=stop_event,
+                details=details,
+                push_progress=False,
+            )
+            if stop_event.is_set():
+                raise RunPausedError("preview race 已有其他任务胜出")
+            ticket = str(solved.get("ticket") or "")
+            randstr = str(solved.get("randstr") or "")
+            if not ticket or not randstr:
+                continue
+            result = self.bigmodel_client.preview_payment(
+                account,
+                session,
+                request,
+                invitation_code=invitation,
+                ticket=ticket,
+                randstr=randstr,
+            )
+            if stop_event.is_set():
+                raise RunPausedError("preview race 已有其他任务胜出")
+            raw = result.raw
+            code = raw.get("code")
+            data = result.data if isinstance(result.data, dict) else {}
+            biz_id = str(data.get("bizId") or "").strip()
+            if code == 200 and biz_id:
+                stop_event.set()
+                preview = PreviewResult(
+                    biz_id=biz_id,
+                    third_party_amount=self._string_value(data, "thirdPartyAmount"),
+                    sold_out=bool(data.get("soldOut")),
+                    original_amount=self._string_value(data, "originalAmount"),
+                    pay_amount=self._string_value(data, "payAmount"),
+                    residual_amount=self._string_value(data, "residualAmount"),
+                    give_amount=self._string_value(data, "giveAmount"),
+                    cash_amount=self._string_value(data, "cashAmount"),
+                    renew_amount=self._string_value(data, "renewAmount"),
+                    campaign_discount_details=list(data.get("campaignDiscountDetails") or []),
+                    last_subscription_summary=self._ensure_dict(
+                        data.get("lastSubscriptionSummary") or {},
+                        label="preview.lastSubscriptionSummary",
+                    ),
+                    raw=raw,
+                )
+                return PreviewRaceWinner(preview=preview, ticket=ticket, randstr=randstr, round=round_no, lane=lane)
+
+            self.runtime_logs.log_event(
+                flow,
+                stage="preview_race",
+                status="retry",
+                message=f"preview 竞速 lane {lane} 未拿到 bizId，继续重试",
+                details={
+                    **details,
+                    "code": code,
+                    "biz_id": biz_id,
+                    "sold_out": bool(data.get("soldOut")),
+                    "msg": raw.get("msg") or "",
+                },
+                level=logging.WARNING,
+            )
+        if round_no >= PREVIEW_RACE_MAX_ROUNDS:
+            raise UpstreamRequestError(
+                f"preview 竞速 lane {lane} 已达到最大重试 {PREVIEW_RACE_MAX_ROUNDS} 轮",
+                details={"lane": lane, "rounds": round_no, "max_rounds": PREVIEW_RACE_MAX_ROUNDS},
+            )
+        raise RunPausedError("preview race 已有其他任务胜出")
 
     def seed_preview(self, account_id: str, request: PreviewSeedRequest) -> PreviewResult:
         session = self.state_service.load_session(account_id)
@@ -887,12 +1344,14 @@ class PaymentService:
                         details={"cycle": cycle, "product_id": product_id},
                         level=logging.WARNING,
                     )
-                    self.preview_payment(
+                    current_account = self.state_service.get_account(account_id)
+                    self.race_preview_payment(
                         account_id,
                         PreviewPaymentRequest(
                             product_id=product_id,
                             invitation_code=invitation,
                         ),
+                        concurrency=current_account.preview_concurrency,
                         flow=flow,
                     )
                     session = self.state_service.load_session(account_id)
@@ -983,6 +1442,7 @@ class PaymentService:
                         session.selected_product_id = product_id
                         self.state_service.save_session(session)
                         saved_task = self.state_service.save_task(task)
+                        self.state_service.touch_account_updated_at(account_id)
                         self.runtime_logs.log_event(
                             flow,
                             stage="sign",
@@ -1101,9 +1561,10 @@ class PaymentService:
                 account_id,
                 "任务已启动，正在准备支付链路",
             )
-            preview = self.preview_payment(
+            preview = self.race_preview_payment(
                 account_id,
                 PreviewPaymentRequest(product_id=selected_product_id),
+                concurrency=self.state_service.get_account(account_id).preview_concurrency,
                 flow=flow,
             )
             task = self.create_qr(

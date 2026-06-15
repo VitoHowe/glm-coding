@@ -10,6 +10,7 @@ from functools import lru_cache
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.browser_profiles import random_browser_impersonate, resolve_browser_impersonate
 from app.config import get_settings
@@ -29,6 +30,13 @@ from app.storage.json_store import JsonFileStore
 TOKEN_COOKIE_KEY = "bigmodel_token_production"
 DEFAULT_INVITATION_CODE = "XOJGYOGNLN"
 DEFAULT_SCHEDULED_START_TIME = "09:59:58"
+DEFAULT_PREVIEW_CONCURRENCY = 1
+MAX_PREVIEW_CONCURRENCY = 4
+
+try:
+    SCHEDULE_TZ = ZoneInfo("Asia/Shanghai")
+except ZoneInfoNotFoundError:  # pragma: no cover - Windows without tzdata
+    SCHEDULE_TZ = None
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +115,12 @@ class AccountStateService:
                 proxy_url=request.proxy_url.strip(),
                 user_agent=request.user_agent.strip(),
                 browser_impersonate=browser_impersonate,
+                preview_concurrency=_clamp_preview_concurrency(existing.get("preview_concurrency") if existing else 1),
                 schedule_enabled=bool(existing.get("schedule_enabled")) if existing else False,
                 scheduled_start_time=str(existing.get("scheduled_start_time") or DEFAULT_SCHEDULED_START_TIME) if existing else DEFAULT_SCHEDULED_START_TIME,
                 last_scheduled_run_at=existing.get("last_scheduled_run_at") if existing else None,
+                last_scheduled_run_key=str(existing.get("last_scheduled_run_key") or "") if existing else "",
+                last_manual_run_at=existing.get("last_manual_run_at") if existing else None,
                 last_schedule_status=str(existing.get("last_schedule_status") or "") if existing else "",
                 last_schedule_message=str(existing.get("last_schedule_message") or "") if existing else "",
                 account_status=str(existing.get("account_status") or "unchecked") if existing else "unchecked",
@@ -153,9 +164,9 @@ class AccountStateService:
         )
         return self.to_public_account(account)
 
-    def update_account(self, account: AccountRecord) -> AccountRecord:
-        now = utc_now_iso()
-        account.updated_at = now
+    def update_account(self, account: AccountRecord, *, touch_updated_at: bool = False) -> AccountRecord:
+        if touch_updated_at:
+            account.updated_at = utc_now_iso()
 
         def updater(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for index, item in enumerate(records):
@@ -166,6 +177,25 @@ class AccountStateService:
 
         self.accounts_store.update(updater)
         return account
+
+    def touch_account_updated_at(self, account_id: str) -> AccountRecord:
+        updated_account: AccountRecord | None = None
+        now = utc_now_iso()
+
+        def updater(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            nonlocal updated_account
+            for index, item in enumerate(records):
+                if item.get("id") != account_id:
+                    continue
+                account = AccountRecord.model_validate(item)
+                account.updated_at = now
+                records[index] = account.model_dump()
+                updated_account = account
+                return records
+            raise NotFoundError("账号不存在", details={"account_id": account_id})
+
+        self.accounts_store.update(updater)
+        return updated_account or self.get_account(account_id)
 
     def update_runtime_progress(
         self,
@@ -212,6 +242,8 @@ class AccountStateService:
     def update_preferences(self, account_id: str, request: AccountPreferencesRequest) -> AccountDetailResponse:
         account = self.get_account(account_id)
         session = self.load_session(account_id)
+        previous_schedule_enabled = account.schedule_enabled
+        previous_scheduled_start_time = account.scheduled_start_time
 
         if request.invitation_code is not None:
             account.invitation_code = request.invitation_code.strip() or DEFAULT_INVITATION_CODE
@@ -221,10 +253,50 @@ class AccountStateService:
             account.scheduled_start_time = request.scheduled_start_time.strip() or DEFAULT_SCHEDULED_START_TIME
         if request.selected_product_id is not None:
             session.selected_product_id = request.selected_product_id.strip()
+        if request.preview_concurrency is not None:
+            account.preview_concurrency = _clamp_preview_concurrency(request.preview_concurrency)
+        if self._should_skip_today_after_schedule_update(
+            account=account,
+            previous_schedule_enabled=previous_schedule_enabled,
+            previous_scheduled_start_time=previous_scheduled_start_time,
+            request=request,
+        ):
+            current_date, _ = self._current_schedule_date_time()
+            account.last_scheduled_run_key = self._scheduled_run_key(current_date, account.scheduled_start_time)
 
-        self.update_account(account)
+        self.update_account(account, touch_updated_at=False)
         self.save_session(session)
         return self.get_account_detail(account_id)
+
+    def _should_skip_today_after_schedule_update(
+        self,
+        *,
+        account: AccountRecord,
+        previous_schedule_enabled: bool,
+        previous_scheduled_start_time: str,
+        request: AccountPreferencesRequest,
+    ) -> bool:
+        if not account.schedule_enabled or not account.scheduled_start_time:
+            return False
+        schedule_touched = request.schedule_enabled is not None or request.scheduled_start_time is not None
+        if not schedule_touched:
+            return False
+        enabled_now = request.schedule_enabled is True and not previous_schedule_enabled
+        time_changed = (
+            request.scheduled_start_time is not None
+            and account.scheduled_start_time != (previous_scheduled_start_time or "")
+        )
+        if not enabled_now and not time_changed:
+            return False
+        _, current_hms = self._current_schedule_date_time()
+        return account.scheduled_start_time <= current_hms
+
+    def _current_schedule_date_time(self) -> tuple[str, str]:
+        now = datetime.now(SCHEDULE_TZ) if SCHEDULE_TZ is not None else datetime.now().astimezone()
+        return now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")
+
+    def _scheduled_run_key(self, current_date: str, scheduled_start_time: str) -> str:
+        return f"{current_date}|{(scheduled_start_time or '').strip()}"
 
     def load_session(self, account_id: str) -> AccountSessionState:
         path = self._session_path(account_id)
@@ -325,10 +397,13 @@ class AccountStateService:
             invitation_code=account.invitation_code,
             proxy_url=account.proxy_url,
             user_agent=account.user_agent,
-            browser_impersonate=account.browser_impersonate,
+            browser_impersonate=resolve_browser_impersonate(account.browser_impersonate),
+            preview_concurrency=account.preview_concurrency,
             schedule_enabled=account.schedule_enabled,
             scheduled_start_time=account.scheduled_start_time,
             last_scheduled_run_at=account.last_scheduled_run_at,
+            last_scheduled_run_key=account.last_scheduled_run_key,
+            last_manual_run_at=account.last_manual_run_at,
             last_schedule_status=account.last_schedule_status,
             last_schedule_message=account.last_schedule_message,
             account_status=account.account_status,
@@ -455,3 +530,11 @@ def mask_secret(value: str) -> str:
     if len(normalized) <= 8:
         return f"{normalized[:2]}***{normalized[-2:]}"
     return f"{normalized[:4]}***{normalized[-4:]}"
+
+
+def _clamp_preview_concurrency(value: Any) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        normalized = DEFAULT_PREVIEW_CONCURRENCY
+    return max(1, min(MAX_PREVIEW_CONCURRENCY, normalized))

@@ -1,0 +1,47 @@
+services:
+  glm-desk:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: glm-desk:main-docker
+    container_name: glm-desk
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8787}:${APP_PORT:-8787}"
+    environment:
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "${APP_PORT:-8787}"
+      DATA_DIR: "/app/data"
+      BIGMODEL_API_BASE: "${BIGMODEL_API_BASE:-https://www.bigmodel.cn/api}"
+      BIGMODEL_ORIGIN: "${BIGMODEL_ORIGIN:-https://www.bigmodel.cn}"
+      BIGMODEL_REFERER: "${BIGMODEL_REFERER:-https://www.bigmodel.cn/glm-coding}"
+      BROWSER_IMPERSONATE: "${BROWSER_IMPERSONATE:-chrome124}"
+      BOOTSTRAP_FINGERPRINT_MAX_RETRIES: "${BOOTSTRAP_FINGERPRINT_MAX_RETRIES:-99}"
+      REQUEST_TIMEOUT_SECONDS: "${REQUEST_TIMEOUT_SECONDS:-20}"
+      DEFAULT_LANGUAGE: "${DEFAULT_LANGUAGE:-zh-CN}"
+      TENCENT_CAPTCHA_DOMAIN: "${TENCENT_CAPTCHA_DOMAIN:-https://turing.captcha.qcloud.com}"
+      TENCENT_CAPTCHA_AID: "${TENCENT_CAPTCHA_AID:-196026326}"
+      TENCENT_CAPTCHA_ENTRY_URL: "${TENCENT_CAPTCHA_ENTRY_URL:-https://www.bigmodel.cn/glm-coding}"
+      TENCENT_CAPTCHA_MAX_RETRIES: "${TENCENT_CAPTCHA_MAX_RETRIES:-3}"
+      TENCENT_CAPTCHA_MIN_CONFIDENCE: "${TENCENT_CAPTCHA_MIN_CONFIDENCE:-0.55}"
+      TENCENT_CAPTCHA_NODE: "node"
+      TENCENT_OCR_ENABLED: "${TENCENT_OCR_ENABLED:-1}"
+      TENCENT_OCR_INCLUDE_DEBUG: "${TENCENT_OCR_INCLUDE_DEBUG:-0}"
+      TENCENT_OCR_WORKERS: "${TENCENT_OCR_WORKERS:-4}"
+      TENCENT_OCR_TIMEOUT_SECONDS: "${TENCENT_OCR_TIMEOUT_SECONDS:-6}"
+      TENCENT_OCR_IDLE_SHRINK_SECONDS: "${TENCENT_OCR_IDLE_SHRINK_SECONDS:-60}"
+      RUNTIME_LOG_LEVEL: "${RUNTIME_LOG_LEVEL:-INFO}"
+      RUNTIME_LOG_RETENTION_DAYS: "${RUNTIME_LOG_RETENTION_DAYS:-7}"
+      XDG_CACHE_HOME: "/app/data/cache"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('APP_PORT', '8787') + '/healthz', timeout=5).read()\""
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

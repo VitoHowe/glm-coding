@@ -14,4 +14,4 @@ data/sessions/*.json
 data/tdc_cache/
 
 node_modules/
-
+web/dist/

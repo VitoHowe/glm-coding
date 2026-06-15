@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
+import base64
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
+from app.config import get_settings
+from app.errors import NotFoundError
 from app.models import (
     AccountPreferencesRequest,
     AccountImportRequest,
@@ -23,10 +28,22 @@ from app.services.payment_service import get_payment_service
 router = APIRouter()
 payment_service = get_payment_service()
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
+SPA_INDEX = Path(__file__).resolve().parents[2] / "web" / "dist" / "index.html"
 
 
 @router.get("/", response_class=HTMLResponse)
 def index(request: Request, ic: str = Query(default="")):
+    if SPA_INDEX.exists():
+        return FileResponse(SPA_INDEX)
+    return render_legacy_index(request, ic)
+
+
+@router.get("/legacy", response_class=HTMLResponse)
+def legacy_index(request: Request, ic: str = Query(default="")):
+    return render_legacy_index(request, ic)
+
+
+def render_legacy_index(request: Request, ic: str = ""):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -41,6 +58,29 @@ def index(request: Request, ic: str = Query(default="")):
 @router.get("/healthz")
 def healthz():
     return success(payment_service.health_payload())
+
+
+@router.get("/api/logs/today")
+def get_today_logs(limit: int = Query(default=500, ge=1, le=2000)):
+    settings = get_settings()
+    date_part = datetime.now().astimezone().strftime("%Y-%m-%d")
+    log_path = settings.runtime_logs_dir / f"events-{date_part}.jsonl"
+    if not log_path.exists():
+        return success({"date": date_part, "path": str(log_path), "lines": [], "text": "", "truncated": False})
+
+    raw_lines = log_path.read_text(encoding="utf-8").splitlines()
+    selected_lines = raw_lines[-limit:]
+    formatted_lines = [_format_runtime_log_line(line) for line in selected_lines]
+    return success(
+        {
+            "date": date_part,
+            "path": str(log_path),
+            "lines": formatted_lines,
+            "text": "\n".join(formatted_lines),
+            "truncated": len(raw_lines) > len(selected_lines),
+            "total": len(raw_lines),
+        }
+    )
 
 
 @router.get("/api/accounts")
@@ -130,6 +170,13 @@ def run_payment_flow(account_id: str):
     return success(get_scheduler_service().start_account_flow(account_id, source="manual"))
 
 
+@router.post("/api/accounts/{account_id}/probe")
+def probe_account_flow(account_id: str):
+    from app.services.scheduler_service import get_scheduler_service
+
+    return success(get_scheduler_service().start_account_flow(account_id, source="probe"))
+
+
 @router.post("/api/accounts/{account_id}/pause")
 def pause_account_flow(account_id: str):
     from app.services.scheduler_service import get_scheduler_service
@@ -147,6 +194,43 @@ def list_tasks(account_id: str):
     return success(payment_service.list_tasks(account_id))
 
 
+@router.get("/api/accounts/{account_id}/tasks/{task_id}/qr.png")
+def get_task_qr_image(account_id: str, task_id: str):
+    task = next((item for item in payment_service.list_tasks(account_id) if item.id == task_id), None)
+    if task is None or not task.qr_base64:
+        raise NotFoundError("二维码不存在", details={"account_id": account_id, "task_id": task_id})
+    return Response(
+        content=_decode_qr_base64(task.qr_base64),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def success(data: Any) -> dict[str, Any]:
     """Wrap success payloads consistently."""
     return {"ok": True, "data": data}
+
+
+def _decode_qr_base64(value: str) -> bytes:
+    payload = (value or "").strip()
+    if "," in payload:
+        payload = payload.split(",", 1)[1]
+    return base64.b64decode(payload)
+
+
+def _format_runtime_log_line(raw_line: str) -> str:
+    try:
+        entry = json.loads(raw_line)
+    except json.JSONDecodeError:
+        return raw_line
+    timestamp = str(entry.get("timestamp") or "")
+    status = str(entry.get("status") or "")
+    account_id = str(entry.get("account_id") or "")
+    action = str(entry.get("action") or "")
+    stage = str(entry.get("stage") or "")
+    message = str(entry.get("message") or "")
+    details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
+    details_text = ""
+    if details:
+        details_text = " | " + json.dumps(details, ensure_ascii=False, separators=(",", ":"))
+    return f"{timestamp} | {status} | {account_id} | {action}/{stage} | {message}{details_text}"

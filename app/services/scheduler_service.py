@@ -29,12 +29,15 @@ class SchedulerService:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._running_accounts: set[str] = set()
+        self._flow_accounts: set[str] = set()
         self._pause_requested: set[str] = set()
+        self._pending_scheduled_runs: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        self._clear_stale_schedule_statuses()
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run_loop, name="glm-desk-scheduler", daemon=True)
         self._thread.start()
@@ -54,6 +57,27 @@ class SchedulerService:
             status="stopped",
             message="调度器已停止",
         )
+
+    def _clear_stale_schedule_statuses(self) -> None:
+        stale_statuses = {"running", "pause_requested"}
+        with self._lock:
+            active_flow_accounts = set(self._flow_accounts)
+        for public_account in self.state_service.list_accounts():
+            if public_account.id in active_flow_accounts:
+                continue
+            account = self.state_service.get_account(public_account.id)
+            if str(account.last_schedule_status or "").lower() not in stale_statuses:
+                continue
+            account.last_schedule_status = "paused"
+            account.last_schedule_message = "服务重启后任务已停止，请重新启动"
+            self.state_service.update_account(account)
+            self.runtime_logs.log_account_event(
+                account_id=account.id,
+                action="run_payment_flow",
+                stage="scheduler",
+                status="stale_cleared",
+                message="已清理服务重启遗留的运行状态",
+            )
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -80,9 +104,12 @@ class SchedulerService:
             if public_account.scheduled_start_time > current_hms:
                 continue
             account = self.state_service.get_account(public_account.id)
-            if self._already_ran_today(account, current_date):
+            run_key = self._scheduled_run_key(current_date, account.scheduled_start_time)
+            if self._already_ran_schedule(account, run_key):
                 continue
-            self.start_account_flow(account.id, source="scheduled")
+            if self._queue_scheduled_run_if_busy(account.id, run_key):
+                continue
+            self.start_account_flow(account.id, source="scheduled", scheduled_run_key=run_key)
 
     def check_cached_accounts_once(self) -> None:
         for public_account in self.state_service.list_accounts():
@@ -140,9 +167,28 @@ class SchedulerService:
                 with self._lock:
                     self._running_accounts.discard(account_id)
 
-    def start_account_flow(self, account_id: str, *, source: str = "manual") -> dict[str, object]:
+    def start_account_flow(
+        self,
+        account_id: str,
+        *,
+        source: str = "manual",
+        scheduled_run_key: str = "",
+    ) -> dict[str, object]:
         with self._lock:
             if account_id in self._running_accounts:
+                if source == "scheduled" and scheduled_run_key:
+                    already_pending = self._pending_scheduled_runs.get(account_id) == scheduled_run_key
+                    self._pending_scheduled_runs[account_id] = scheduled_run_key
+                    if not already_pending:
+                        self.runtime_logs.log_account_event(
+                            account_id=account_id,
+                            action="run_payment_flow",
+                            stage="scheduler",
+                            status="pending",
+                            message="定时任务到点时账号正在运行，已挂起等待当前任务结束",
+                            details={"scheduled_run_key": scheduled_run_key},
+                        )
+                    return {"started": False, "status": "pending"}
                 self.runtime_logs.log_account_event(
                     account_id=account_id,
                     action="run_payment_flow",
@@ -154,11 +200,26 @@ class SchedulerService:
                 )
                 return {"started": False, "status": "running"}
             self._pause_requested.discard(account_id)
+            if source == "scheduled":
+                self._pending_scheduled_runs.pop(account_id, None)
             self._running_accounts.add(account_id)
+            self._flow_accounts.add(account_id)
         account = self.state_service.get_account(account_id)
-        account.last_scheduled_run_at = utc_now_iso()
+        if source == "scheduled":
+            account.last_scheduled_run_at = utc_now_iso()
+            account.last_scheduled_run_key = scheduled_run_key or self._scheduled_run_key(
+                datetime.now(SCHEDULER_TZ).strftime("%Y-%m-%d") if SCHEDULER_TZ is not None else datetime.now().astimezone().strftime("%Y-%m-%d"),
+                account.scheduled_start_time,
+            )
+        else:
+            account.last_manual_run_at = utc_now_iso()
         account.last_schedule_status = "running"
-        account.last_schedule_message = "定时任务运行中" if source == "scheduled" else "手动任务运行中"
+        if source == "scheduled":
+            account.last_schedule_message = "定时任务运行中"
+        elif source == "probe":
+            account.last_schedule_message = "测活任务运行中"
+        else:
+            account.last_schedule_message = "手动任务运行中"
         self.state_service.update_account(account)
         self.runtime_logs.log_account_event(
             account_id=account_id,
@@ -178,9 +239,31 @@ class SchedulerService:
 
     def request_pause(self, account_id: str) -> dict[str, object]:
         with self._lock:
-            if account_id not in self._running_accounts:
-                return {"paused": False, "status": "idle"}
-            self._pause_requested.add(account_id)
+            is_flow_running = account_id in self._flow_accounts
+            if is_flow_running:
+                self._pause_requested.add(account_id)
+        if not is_flow_running:
+            account = self.state_service.get_account(account_id)
+            stale_statuses = {"running", "pause_requested"}
+            if str(account.last_schedule_status or "").lower() in stale_statuses:
+                latest_task = next(iter(self.state_service.list_tasks(account_id)), None)
+                if latest_task and latest_task.qr_base64:
+                    account.last_schedule_status = "success"
+                    account.last_schedule_message = f"生成二维码成功：{latest_task.biz_id}"
+                    self.state_service.update_account(account)
+                    return {"paused": False, "status": "success", "stale_cleared": True}
+                account.last_schedule_status = "paused"
+                account.last_schedule_message = "任务不在当前进程运行，已清理陈旧运行状态"
+                self.state_service.update_account(account)
+                self.runtime_logs.log_account_event(
+                    account_id=account_id,
+                    action="run_payment_flow",
+                    stage="pause",
+                    status="stale_cleared",
+                    message="暂停时发现任务不在当前进程运行，已清理陈旧状态",
+                )
+                return {"paused": False, "status": "paused", "stale_cleared": True}
+            return {"paused": False, "status": "idle"}
         account = self.state_service.get_account(account_id)
         account.last_schedule_status = "pause_requested"
         account.last_schedule_message = "暂停请求已提交"
@@ -198,18 +281,54 @@ class SchedulerService:
         with self._lock:
             return account_id in self._pause_requested
 
-    def _already_ran_today(self, account, current_date: str) -> bool:
-        raw = (account.last_scheduled_run_at or "").strip()
-        return raw.startswith(current_date)
+    def _scheduled_run_key(self, current_date: str, scheduled_start_time: str) -> str:
+        return f"{current_date}|{(scheduled_start_time or '').strip()}"
+
+    def _already_ran_schedule(self, account, run_key: str) -> bool:
+        return bool(run_key) and (account.last_scheduled_run_key or "").strip() == run_key
+
+    def _queue_scheduled_run_if_busy(self, account_id: str, run_key: str) -> bool:
+        with self._lock:
+            if account_id not in self._running_accounts:
+                return False
+            if self._pending_scheduled_runs.get(account_id) == run_key:
+                return True
+            self._pending_scheduled_runs[account_id] = run_key
+        self.runtime_logs.log_account_event(
+            account_id=account_id,
+            action="run_payment_flow",
+            stage="scheduler",
+            status="pending",
+            message="定时任务到点时账号正在运行，已挂起等待当前任务结束",
+            details={"scheduled_run_key": run_key},
+        )
+        return True
+
+    def _pop_pending_scheduled_run(self, account_id: str) -> str:
+        with self._lock:
+            return self._pending_scheduled_runs.pop(account_id, "")
+
+    def _start_pending_scheduled_run(self, account_id: str, run_key: str) -> None:
+        if not run_key:
+            return
+        account = self.state_service.get_account(account_id)
+        if not account.schedule_enabled:
+            return
+        scheduled_date, _, _ = run_key.partition("|")
+        if run_key != self._scheduled_run_key(scheduled_date, account.scheduled_start_time):
+            return
+        if self._already_ran_schedule(account, run_key):
+            return
+        self.start_account_flow(account_id, source="scheduled", scheduled_run_key=run_key)
 
     def _run_account_flow(self, account_id: str, source: str) -> None:
         try:
             task = self.payment_service.run_payment_flow(account_id, source=source)
             account = self.state_service.get_account(account_id)
             account.last_schedule_status = "success"
-            account.last_schedule_message = f"生成二维码成功：{task.biz_id}"
+            account.last_schedule_message = f"账号链路正常：{task.biz_id}" if source == "probe" else f"生成二维码成功：{task.biz_id}"
             account.account_status = "valid"
-            account.account_status_message = "最近一次执行成功"
+            account.account_status_message = "账号链路正常" if source == "probe" else "最近一次执行成功"
             account.account_checked_at = utc_now_iso()
             self.state_service.update_account(account)
         except RunPausedError as exc:
@@ -227,9 +346,9 @@ class SchedulerService:
         except Exception as exc:
             account = self.state_service.get_account(account_id)
             account.last_schedule_status = "failed"
-            account.last_schedule_message = str(exc)
+            account.last_schedule_message = f"账号链路异常：{exc}" if source == "probe" else str(exc)
             account.account_status = "error"
-            account.account_status_message = str(exc)
+            account.account_status_message = f"账号链路异常：{exc}" if source == "probe" else str(exc)
             account.account_checked_at = utc_now_iso()
             self.state_service.update_account(account)
             logger.exception("scheduled account flow failed for %s: %s", account_id, exc)
@@ -245,7 +364,9 @@ class SchedulerService:
         finally:
             with self._lock:
                 self._running_accounts.discard(account_id)
+                self._flow_accounts.discard(account_id)
                 self._pause_requested.discard(account_id)
+            self._start_pending_scheduled_run(account_id, self._pop_pending_scheduled_run(account_id))
 
 
 _scheduler_service: SchedulerService | None = None

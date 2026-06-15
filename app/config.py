@@ -28,6 +28,7 @@ class Settings:
     bigmodel_origin: str
     bigmodel_referer: str
     browser_impersonate: str
+    bootstrap_fingerprint_max_retries: int
     request_timeout_seconds: float
     default_language: str
     tencent_captcha_domain: str
@@ -40,6 +41,7 @@ class Settings:
     tencent_ocr_include_debug: bool
     tencent_ocr_workers: int
     tencent_ocr_timeout_seconds: int
+    tencent_ocr_idle_shrink_seconds: int
     runtime_log_level: str
     runtime_log_retention_days: int
 
@@ -65,7 +67,14 @@ def get_settings() -> Settings:
         bigmodel_api_base=os.getenv("BIGMODEL_API_BASE", "https://www.bigmodel.cn/api").rstrip("/"),
         bigmodel_origin=os.getenv("BIGMODEL_ORIGIN", "https://www.bigmodel.cn").rstrip("/"),
         bigmodel_referer=os.getenv("BIGMODEL_REFERER", "https://www.bigmodel.cn/glm-coding").strip(),
-        browser_impersonate=os.getenv("BROWSER_IMPERSONATE", "chrome124").strip() or "chrome124",
+        browser_impersonate=os.getenv("BROWSER_IMPERSONATE", "chrome146").strip() or "chrome146",
+        bootstrap_fingerprint_max_retries=max(
+            1,
+            _parse_int(
+                os.getenv("BOOTSTRAP_FINGERPRINT_MAX_RETRIES", "99"),
+                field_name="BOOTSTRAP_FINGERPRINT_MAX_RETRIES",
+            ),
+        ),
         request_timeout_seconds=_parse_float(
             os.getenv("REQUEST_TIMEOUT_SECONDS", "20"),
             field_name="REQUEST_TIMEOUT_SECONDS",
@@ -93,12 +102,19 @@ def get_settings() -> Settings:
         tencent_ocr_enabled=_parse_bool(os.getenv("TENCENT_OCR_ENABLED", "1")),
         tencent_ocr_include_debug=_parse_bool(os.getenv("TENCENT_OCR_INCLUDE_DEBUG", "0")),
         tencent_ocr_workers=_parse_int(
-            os.getenv("TENCENT_OCR_WORKERS", str(max(1, min(4, os.cpu_count() or 1)))),
+            os.getenv("TENCENT_OCR_WORKERS", "4"),
             field_name="TENCENT_OCR_WORKERS",
         ),
         tencent_ocr_timeout_seconds=_parse_int(
             os.getenv("TENCENT_OCR_TIMEOUT_SECONDS", "6"),
             field_name="TENCENT_OCR_TIMEOUT_SECONDS",
+        ),
+        tencent_ocr_idle_shrink_seconds=max(
+            1,
+            _parse_int(
+                os.getenv("TENCENT_OCR_IDLE_SHRINK_SECONDS", "60"),
+                field_name="TENCENT_OCR_IDLE_SHRINK_SECONDS",
+            ),
         ),
         runtime_log_level=os.getenv("RUNTIME_LOG_LEVEL", "INFO").strip() or "INFO",
         runtime_log_retention_days=_parse_int(

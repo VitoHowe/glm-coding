@@ -29,6 +29,23 @@ if not exist .venv\Scripts\python.exe (
 echo [glmDesk] Syncing Python dependencies...
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 
+if exist web\package.json (
+    where npm >nul 2>&1
+    if errorlevel 1 (
+        echo [glmDesk] npm not found; skipping Vue frontend build and using legacy page fallback.
+    ) else (
+        if not exist web\node_modules (
+            echo [glmDesk] Installing Vue frontend dependencies...
+            pushd web
+            call npm install
+            popd
+        )
+        echo [glmDesk] Building Vue frontend...
+        pushd web
+        call npm run build
+        popd
+    )
+)
 echo [glmDesk] Starting FastAPI server...
 .venv\Scripts\python.exe -m uvicorn app.main:app --host %APP_HOST% --port %APP_PORT% --reload
 

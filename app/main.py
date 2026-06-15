@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.errors import install_exception_handlers
 from app.runtime_logging import configure_logging, get_runtime_log_service
@@ -26,6 +28,9 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
     install_exception_handlers(app)
+    dist_assets = Path(__file__).resolve().parents[1] / "web" / "dist" / "assets"
+    if dist_assets.exists():
+        app.mount("/assets", StaticFiles(directory=str(dist_assets)), name="spa-assets")
     app.include_router(router)
 
     @app.on_event("startup")
