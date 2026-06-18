@@ -97,6 +97,7 @@ export interface PublicAccountRecord {
   preview_concurrency_time?: string;
   ticket_pool_size?: number;
   ticket_pool_drain_interval_ms?: number;
+  preview_warmup_lead_seconds?: number;
   invitation_code?: string;
   stock_monitor_enabled?: boolean;
   stock_monitor_last_checked_at?: string | null;
@@ -182,4 +183,5 @@ export interface AccountPreferencesPayload {
   scheduled_start_time?: string | null;
   ticket_pool_size?: number | null;
   ticket_pool_drain_interval_ms?: number | null;
+  preview_warmup_lead_seconds?: number | null;
 }

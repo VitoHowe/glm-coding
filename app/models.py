@@ -89,6 +89,7 @@ class AccountRecord(BaseModel):
     preview_concurrency_time: str = ""
     ticket_pool_size: int = 0  # 0 = disabled; N > 0 = pool mode: collect N tickets first
     ticket_pool_drain_interval_ms: int = 0  # 0 = parallel drain; N > 0 = serial drain interval
+    preview_warmup_lead_seconds: int = 0  # scheduler fires this many seconds before scheduled_start_time
     stock_monitor_enabled: bool = False
     stock_monitor_last_checked_at: str | None = None
     stock_monitor_last_message: str = ""
@@ -130,6 +131,7 @@ class PublicAccountRecord(BaseModel):
     preview_concurrency_time: str = ""
     ticket_pool_size: int = 0
     ticket_pool_drain_interval_ms: int = 0
+    preview_warmup_lead_seconds: int = 0
     invitation_code: str = DEFAULT_INVITATION_CODE
     stock_monitor_enabled: bool = False
     stock_monitor_last_checked_at: str | None = None
@@ -289,6 +291,7 @@ class AccountPreferencesRequest(BaseModel):
     preview_concurrency_time: str | None = None
     ticket_pool_size: int | None = None
     ticket_pool_drain_interval_ms: int | None = None
+    preview_warmup_lead_seconds: int | None = None
     schedule_enabled: bool | None = None
     scheduled_start_time: str | None = None
 
@@ -322,6 +325,18 @@ class AccountPreferencesRequest(BaseModel):
             raise ValueError("ticket 发射间隔不能为负数")
         if v > 10_000:
             raise ValueError("ticket 发射间隔不能超过 10000ms")
+        return v
+
+    @field_validator("preview_warmup_lead_seconds")
+    @classmethod
+    def validate_preview_warmup_lead_seconds(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        v = int(value)
+        if v < 0:
+            raise ValueError("warmup 提前秒数不能为负数")
+        if v > 120:
+            raise ValueError("warmup 提前秒数不能超过 120 秒")
         return v
 
 

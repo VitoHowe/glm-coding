@@ -107,6 +107,9 @@ export const zhCN = {
   schedule: {
     enableLabel: "启用定时任务",
     timeLabel: "定时启动时间",
+    warmupLeadLabel: "提前预热秒数",
+    warmupLeadShort: "提前 s",
+    warmupLeadHint: "0-120：定时任务提前启动，用于先收集 ticket 并等到并发时间发射",
   },
   qr: {
     alt: "最新支付二维码",

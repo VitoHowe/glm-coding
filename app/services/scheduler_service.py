@@ -108,15 +108,34 @@ class SchedulerService:
         for public_account in self.state_service.list_accounts():
             if not public_account.schedule_enabled or not public_account.scheduled_start_time:
                 continue
-            if public_account.scheduled_start_time > current_hms:
+            effective_start = self._effective_trigger_hms(
+                public_account.scheduled_start_time,
+                getattr(public_account, "preview_warmup_lead_seconds", 0) or 0,
+            )
+            if effective_start > current_hms:
                 continue
             account = self.state_service.get_account(public_account.id)
+            # run_key is keyed on the user-facing scheduled_start_time so warmup-lead
+            # changes don't accidentally re-fire an already-ran schedule for today.
             run_key = self._scheduled_run_key(current_date, account.scheduled_start_time)
             if self._already_ran_schedule(account, run_key):
                 continue
             if self._queue_scheduled_run_if_busy(account.id, run_key):
                 continue
             self.start_account_flow(account.id, source="scheduled", scheduled_run_key=run_key)
+
+    @staticmethod
+    def _effective_trigger_hms(scheduled_start_time: str, lead_seconds: int) -> str:
+        if lead_seconds <= 0:
+            return scheduled_start_time
+        try:
+            hh, mm, ss = (int(p) for p in scheduled_start_time.split(":"))
+        except ValueError:
+            return scheduled_start_time
+        total = hh * 3600 + mm * 60 + ss - max(0, int(lead_seconds))
+        if total < 0:
+            total = 0
+        return f"{total // 3600:02d}:{(total // 60) % 60:02d}:{total % 60:02d}"
 
     def check_cached_accounts_once(self) -> None:
         for public_account in self.state_service.list_accounts():

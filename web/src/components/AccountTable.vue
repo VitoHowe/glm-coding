@@ -18,7 +18,12 @@ defineProps<{
 const emit = defineEmits<{
     openContext: [detail: AccountDetailResponse];
     selectProduct: [accountId: string, productId: string];
-    updateSchedule: [accountId: string, enabled: boolean, time: string];
+    updateSchedule: [
+        accountId: string,
+        enabled: boolean,
+        time: string,
+        warmupLeadSeconds: number,
+    ];
     updatePreviewConcurrency: [accountId: string, value: number];
     updatePreviewConcurrencyTimeEnabled: [
         accountId: string,
@@ -74,7 +79,9 @@ function scheduleStateText(detail: AccountDetailResponse) {
     if (!detail.account.schedule_enabled) {
         return copy.table.scheduleDisabled;
     }
-    return `${copy.table.scheduleEnabled} ${detail.account.scheduled_start_time || "00:00:00"}`;
+    const leadSeconds = warmupLeadSeconds(detail);
+    const leadText = leadSeconds > 0 ? ` / ${copy.schedule.warmupLeadShort} ${leadSeconds}` : "";
+    return `${copy.table.scheduleEnabled} ${detail.account.scheduled_start_time || "00:00:00"}${leadText}`;
 }
 
 function productOptions(detail: AccountDetailResponse) {
@@ -110,6 +117,13 @@ function previewConcurrencyTimeValue(detail: AccountDetailResponse) {
 
 function previewConcurrencyTimeEnabled(detail: AccountDetailResponse) {
     return Boolean(detail.account.preview_concurrency_time_enabled);
+}
+
+function warmupLeadSeconds(detail: AccountDetailResponse) {
+    return Math.max(
+        0,
+        Math.min(120, Number(detail.account.preview_warmup_lead_seconds || 0)),
+    );
 }
 
 function updatePreviewConcurrencyTimeEnabled(
@@ -271,13 +285,17 @@ function onTicketPoolUpdate(
                                         detail.account.scheduled_start_time ||
                                         '00:00:00'
                                     "
+                                    :warmup-lead-seconds="
+                                        warmupLeadSeconds(detail)
+                                    "
                                     @update="
-                                        (id, enabled, time) =>
+                                        (id, enabled, time, leadSeconds) =>
                                             emit(
                                                 'updateSchedule',
                                                 id,
                                                 enabled,
                                                 time,
+                                                leadSeconds,
                                             )
                                     "
                                 />

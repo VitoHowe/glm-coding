@@ -21,7 +21,7 @@ Current dashboard refresh intentionally preserves the legacy N+1 pattern: list a
 ## Account management
 
 - `POST /api/accounts/import` with `AccountImportPayload` -> imports and syncs an account.
-- `PATCH /api/accounts/{account_id}` with `AccountPreferencesPayload` -> updates selected product and schedule preferences.
+- `PATCH /api/accounts/{account_id}` with `AccountPreferencesPayload` -> updates selected product, schedule timing, warmup lead, preview concurrency, and ticket-pool preferences.
 - `DELETE /api/accounts/{account_id}` -> deletes account and local cache.
 - `POST /api/accounts/{account_id}/bootstrap?refresh_fingerprint=true` -> syncs account context and rotates fingerprint.
 
