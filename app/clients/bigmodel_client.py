@@ -157,7 +157,7 @@ class BigModelClient:
             raise BadRequestError("账号缺少 token，没法请求 BigModel")
 
         headers = {
-            "Authorization": token,
+            "Authorization": f"Bearer {token}",
             "Bigmodel-Organization": session.org_id or account.org_id,
             "Bigmodel-Project": session.project_id or account.project_id,
         }

@@ -455,13 +455,24 @@ class SchedulerService:
             account.last_schedule_message = account.stock_monitor_last_message
             self.state_service.update_account(account)
             logger.warning("stock monitor check failed for %s: %s", account_id, exc)
+            upstream_details = getattr(exc, "details", None) or {}
+            event_details: dict[str, object] = {
+                "error": exc.__class__.__name__,
+                "message": str(exc),
+            }
+            upstream_status_code = upstream_details.get("status_code")
+            if upstream_status_code is not None:
+                event_details["upstream_status_code"] = upstream_status_code
+            upstream_url = upstream_details.get("url")
+            if upstream_url:
+                event_details["upstream_url"] = upstream_url
             self.runtime_logs.log_account_event(
                 account_id=account_id,
                 action="stock_monitor",
                 stage="stock_check",
                 status="failed",
                 message="库存检查失败，继续监控",
-                details={"error": exc.__class__.__name__, "message": str(exc)},
+                details=event_details,
                 level=logging.WARNING,
             )
             return True
