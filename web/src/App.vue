@@ -70,10 +70,12 @@ async function updateSchedule(
     accountId: string,
     enabled: boolean,
     time: string,
+    warmupLeadSeconds: number,
 ) {
     await dashboard.updatePreferences(accountId, {
         schedule_enabled: enabled,
         scheduled_start_time: time,
+        preview_warmup_lead_seconds: warmupLeadSeconds,
     });
 }
 

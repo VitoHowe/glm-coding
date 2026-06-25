@@ -36,6 +36,7 @@ from app.models import (
     PreviewResult,
     PreviewSeedRequest,
     ProductOffer,
+    TicketPoolEntry,
 )
 from app.runtime_logging import FlowRun, RuntimeLogService, get_runtime_log_service
 from app.services.account_state import (
@@ -73,6 +74,9 @@ class PreviewRaceWinner:
 
 
 PREVIEW_RACE_MAX_ROUNDS = 999
+PREVIEW_TICKET_REUSE_ON_555_ATTEMPTS = 2
+PREVIEW_TICKET_REUSE_DELAY_SECONDS = 0.05
+PREVIEW_TICKET_POOL_MAX_CYCLES = 999
 
 
 STATIC_PRODUCTS: tuple[StaticProduct, ...] = (
@@ -259,6 +263,65 @@ class PaymentService:
             "preview_response": raw,
         }
 
+    def _call_preview_with_ticket_reuse(
+        self,
+        account_id: str,
+        account: AccountRecord,
+        session: AccountSessionState,
+        request: PreviewPaymentRequest,
+        invitation: str,
+        *,
+        ticket: str,
+        randstr: str,
+        allow_fallback_proxy: bool,
+        flow: FlowRun | None,
+        context: dict[str, Any] | None = None,
+        stop_event: threading.Event | None = None,
+    ):
+        """Call /preview, retrying code 555 briefly with the same captcha ticket."""
+        attempts = max(1, 1 + PREVIEW_TICKET_REUSE_ON_555_ATTEMPTS)
+        details = context or {}
+        for attempt in range(1, attempts + 1):
+            self._ensure_not_paused(account_id)
+            if stop_event is not None and stop_event.is_set():
+                raise RunPausedError("preview race 已有其他任务胜出")
+
+            result = self.bigmodel_client.preview_payment(
+                account,
+                session,
+                request,
+                invitation_code=invitation,
+                ticket=ticket,
+                randstr=randstr,
+                allow_fallback_proxy=allow_fallback_proxy,
+            )
+            raw = result.raw
+            if raw.get("code") != 555 or attempt >= attempts:
+                return result
+
+            self.runtime_logs.log_event(
+                flow,
+                stage="preview_same_ticket_retry",
+                status="retry",
+                message="preview 返回 555，复用当前 ticket 快速重试",
+                details={
+                    **details,
+                    "same_ticket_attempt": attempt,
+                    "same_ticket_max_attempts": attempts,
+                    "delay_seconds": PREVIEW_TICKET_REUSE_DELAY_SECONDS,
+                    **self._preview_response_log_details(
+                        raw=raw,
+                        ticket=ticket,
+                        randstr=randstr,
+                    ),
+                },
+                level=logging.WARNING,
+            )
+            if PREVIEW_TICKET_REUSE_DELAY_SECONDS > 0:
+                time.sleep(PREVIEW_TICKET_REUSE_DELAY_SECONDS)
+
+        raise RuntimeError("preview retry loop exited unexpectedly")
+
     def _preview_concurrency_wait_seconds(self, target_time: str) -> float:
         parts = target_time.split(":")
         if len(parts) != 3:
@@ -313,7 +376,11 @@ class PaymentService:
         )
         remaining = wait_seconds
         while remaining > 0:
-            if stop_event.wait(min(0.1, remaining)):
+            # Tighten the busy-wait granularity to ~5ms in the final 0.5s so all
+            # lanes fire within a few ms of the target instant; cheaper 100ms
+            # ticks the rest of the way.
+            tick = 0.005 if remaining < 0.5 else 0.1
+            if stop_event.wait(min(tick, remaining)):
                 raise RunPausedError("preview race 已有其他任务胜出")
             self._ensure_not_paused(account_id)
             remaining = self._preview_concurrency_wait_seconds(target_time)
@@ -1135,6 +1202,7 @@ class PaymentService:
         *,
         flow: FlowRun,
         deadline_time: str = "",
+        cycle: int = 1,
     ) -> AccountSessionState:
         """Collect captcha tickets until pool has ``target_size`` unused entries.
 
@@ -1149,7 +1217,7 @@ class PaymentService:
             stage="ticket_pool_fill",
             status="started",
             message=f"开始填充 ticket 池，目标 {target_size} 个，当前已有 {unused_count} 个未使用",
-            details={"target": target_size, "already_collected": unused_count},
+            details={"cycle": cycle, "target": target_size, "already_collected": unused_count},
         )
         self._push_runtime_message(account_id, f"ticket 池填充中 ({unused_count}/{target_size})")
 
@@ -1162,7 +1230,7 @@ class PaymentService:
                     stage="ticket_pool_fill",
                     status="deadline_reached",
                     message=f"并发时间已到，中止填充（已收集 {unused_count}/{target_size}）",
-                    details={"target": target_size, "collected": unused_count},
+                    details={"cycle": cycle, "target": target_size, "collected": unused_count},
                     level=logging.WARNING,
                 )
                 break
@@ -1182,7 +1250,7 @@ class PaymentService:
                     stage="ticket_pool_fill",
                     status="retry",
                     message=f"ticket 池填充：验证码识别异常，重试 ({exc})",
-                    details={"error": str(exc)},
+                    details={"cycle": cycle, "error": str(exc)},
                     level=logging.WARNING,
                 )
                 continue
@@ -1192,7 +1260,6 @@ class PaymentService:
             if not ticket or not randstr:
                 continue
 
-            from app.models import TicketPoolEntry
             entry = TicketPoolEntry(
                 ticket=ticket,
                 randstr=randstr,
@@ -1209,7 +1276,7 @@ class PaymentService:
                 stage="ticket_pool_fill",
                 status="progress",
                 message=f"ticket 池: {unused_count}/{target_size} 已收集",
-                details={"collected": unused_count, "target": target_size, "ticket_prefix": ticket[:12]},
+                details={"cycle": cycle, "collected": unused_count, "target": target_size, "ticket_prefix": ticket[:12]},
             )
             self._push_runtime_message(account_id, f"ticket 池 {unused_count}/{target_size} 已就绪")
 
@@ -1218,7 +1285,33 @@ class PaymentService:
             stage="ticket_pool_fill",
             status="done",
             message=f"ticket 池填充完成，共 {unused_count} 个可用 ticket",
-            details={"collected": unused_count, "target": target_size},
+            details={"cycle": cycle, "collected": unused_count, "target": target_size},
+        )
+        return session
+
+    def _prune_used_ticket_pool_entries(
+        self,
+        account_id: str,
+        session: AccountSessionState,
+        *,
+        flow: FlowRun,
+        reason: str,
+        cycle: int,
+    ) -> AccountSessionState:
+        pool = list(session.ticket_pool)
+        unused = [entry for entry in pool if not entry.used]
+        removed = len(pool) - len(unused)
+        if removed <= 0:
+            return session
+
+        session.ticket_pool = unused
+        self.state_service.save_session(session)
+        self.runtime_logs.log_event(
+            flow,
+            stage="ticket_pool",
+            status="pruned",
+            message=f"已清理 {removed} 个用过的 ticket，保留 {len(unused)} 个未使用 ticket",
+            details={"cycle": cycle, "reason": reason, "removed": removed, "remaining_unused": len(unused)},
         )
         return session
 
@@ -1330,14 +1423,22 @@ class PaymentService:
             )
 
             try:
-                result = self.bigmodel_client.preview_payment(
+                result = self._call_preview_with_ticket_reuse(
+                    account_id,
                     account,
                     session,
                     request,
-                    invitation_code=invitation,
+                    invitation,
                     ticket=ticket,
                     randstr=randstr,
                     allow_fallback_proxy=True,
+                    flow=flow,
+                    context={
+                        "idx": idx,
+                        "total": len(unused),
+                        "mode": "serial",
+                        "pool_mode": True,
+                    },
                 )
             except UpstreamRequestError as exc:
                 self.runtime_logs.log_event(
@@ -1538,14 +1639,24 @@ class PaymentService:
         )
 
         try:
-            result = self.bigmodel_client.preview_payment(
+            result = self._call_preview_with_ticket_reuse(
+                account_id,
                 account,
                 session,
                 request,
-                invitation_code=invitation,
+                invitation,
                 ticket=ticket,
                 randstr=randstr,
                 allow_fallback_proxy=True,
+                flow=flow,
+                context={
+                    "idx": idx,
+                    "total": total,
+                    "mode": "parallel",
+                    "pool_mode": True,
+                    "dispatch_delay_ms": round(delay_ms, 3),
+                },
+                stop_event=stop_event,
             )
         except UpstreamRequestError as exc:
             self.runtime_logs.log_event(
@@ -1701,13 +1812,17 @@ class PaymentService:
                     continue
 
                 try:
-                    result = self.bigmodel_client.preview_payment(
+                    result = self._call_preview_with_ticket_reuse(
+                        account_id,
                         account,
                         session,
                         request,
-                        invitation_code=invitation,
+                        invitation,
                         ticket=ticket,
                         randstr=randstr,
+                        allow_fallback_proxy=False,
+                        flow=flow,
+                        context={"round": preview_round, "product_id": request.product_id},
                     )
                 except UpstreamRequestError as exc:
                     preview_attempts.append(
@@ -2103,13 +2218,18 @@ class PaymentService:
                 )
                 preview_wait_used = True
             try:
-                result = self.bigmodel_client.preview_payment(
+                result = self._call_preview_with_ticket_reuse(
+                    account_id,
                     account,
                     session,
                     request,
-                    invitation_code=invitation,
+                    invitation,
                     ticket=ticket,
                     randstr=randstr,
+                    allow_fallback_proxy=False,
+                    flow=flow,
+                    context={**details, "product_id": request.product_id},
+                    stop_event=stop_event,
                 )
             except UpstreamRequestError as exc:
                 self.runtime_logs.log_event(
@@ -2464,10 +2584,8 @@ class PaymentService:
             ticket_pool_size = current_account.ticket_pool_size
 
             if ticket_pool_size > 0:
-                # Pool mode: pre-collect N tickets, then drain them into /preview one by one.
-                # The pool is used ONLY for the first attempt; if all tickets are exhausted
-                # without a bizId, _run_pool_preview falls back internally to
-                # race_preview_payment — no exception escapes this branch.
+                # Pool mode: keep pre-collecting N tickets, then drain them into
+                # /preview bursts until a bizId is received.
                 deadline_time = (
                     current_account.preview_concurrency_time
                     if current_account.preview_concurrency_time_enabled
@@ -2547,101 +2665,121 @@ class PaymentService:
         deadline_time: str,
         flow: "FlowRun",
     ) -> PreviewResult:
-        """Fill the ticket pool then drain it one-by-one against /preview.
-
-        Executes only **once** — does NOT loop on exhaustion.
-        If all pool tickets are consumed without a bizId, falls back directly
-        to ``race_preview_payment`` without raising, so the caller's chain
-        is never interrupted by the pool exhaustion case.
-        """
+        """Keep filling and draining ticket batches until /preview returns a bizId."""
         self._ensure_not_paused(account_id)
-        current_account, session = self._ensure_context(account_id)
+        first_deadline_wait_done = False
+        last_exhaustion: UpstreamRequestError | None = None
 
-        # Step 1: fill until we have ticket_pool_size unused entries
-        session = self._fill_ticket_pool(
-            account_id,
-            current_account,
-            session,
-            ticket_pool_size,
-            flow=flow,
-            deadline_time=deadline_time,
-        )
+        for cycle in range(1, PREVIEW_TICKET_POOL_MAX_CYCLES + 1):
+            self._ensure_not_paused(account_id)
+            current_account = self.state_service.get_account(account_id)
+            session = self.state_service.load_session(account_id)
+            session = self._prune_used_ticket_pool_entries(
+                account_id,
+                session,
+                flow=flow,
+                reason="cycle_start",
+                cycle=cycle,
+            )
 
-        # Reload after fill — session was saved incrementally inside _fill_ticket_pool
-        current_account = self.state_service.get_account(account_id)
-        session = self.state_service.load_session(account_id)
-        invitation = current_account.invitation_code.strip()
-
-        # If deadline is configured and pool filled BEFORE the deadline,
-        # hold here until the deadline arrives so that drain fires exactly on time.
-        if deadline_time:
-            wait_secs = self._preview_concurrency_wait_seconds(deadline_time)
-            if wait_secs > 0:
-                unused_count = sum(1 for e in session.ticket_pool if not e.used)
-                self.runtime_logs.log_event(
-                    flow,
-                    stage="ticket_pool_wait",
-                    status="waiting",
-                    message=f"ticket 池已满（{unused_count} 张），等待并发时间 {deadline_time}（剩余 {wait_secs:.1f} 秒）",
-                    details={"deadline": deadline_time, "wait_seconds": round(wait_secs, 3), "pool_collected": unused_count},
-                )
-                self._push_runtime_message(account_id, f"ticket 池已满，等待 {deadline_time} 开始抢购…")
-                while True:
-                    self._ensure_not_paused(account_id)
-                    remaining = self._preview_concurrency_wait_seconds(deadline_time)
-                    if remaining <= 0:
-                        break
-                    import time as _time
-                    _time.sleep(min(0.1, remaining))
-                self.runtime_logs.log_event(
-                    flow,
-                    stage="ticket_pool_wait",
-                    status="ready",
-                    message="并发时间到，开始消耗 ticket 池",
-                    details={"deadline": deadline_time, "pool_collected": unused_count},
-                )
-                self._push_runtime_message(account_id, "并发时间到，开始消耗 ticket 池抢购")
-
-        # Step 2: drain pool tickets into /preview until bizId is received.
-        # If all tickets are exhausted without success, fall back directly to
-        # race_preview_payment — no exception propagates out of this method.
-        try:
-            preview = self._drain_ticket_pool(
+            fill_deadline = deadline_time if not first_deadline_wait_done else ""
+            session = self._fill_ticket_pool(
                 account_id,
                 current_account,
                 session,
-                PreviewPaymentRequest(product_id=product_id),
-                invitation,
+                ticket_pool_size,
                 flow=flow,
+                deadline_time=fill_deadline,
+                cycle=cycle,
             )
-        except UpstreamRequestError as exc:
-            if "已耗尽" not in exc.message:
-                raise
-            self.runtime_logs.log_event(
-                flow,
-                stage="ticket_pool",
-                status="fallback",
-                message="ticket 池已耗尽未拿到 bizId，切换竞速模式继续抢购",
+
+            current_account = self.state_service.get_account(account_id)
+            session = self.state_service.load_session(account_id)
+            invitation = current_account.invitation_code.strip()
+
+            if deadline_time and not first_deadline_wait_done:
+                wait_secs = self._preview_concurrency_wait_seconds(deadline_time)
+                if wait_secs > 0:
+                    unused_count = sum(1 for e in session.ticket_pool if not e.used)
+                    self.runtime_logs.log_event(
+                        flow,
+                        stage="ticket_pool_wait",
+                        status="waiting",
+                        message=f"ticket 池已满（{unused_count} 张），等待并发时间 {deadline_time}（剩余 {wait_secs:.1f} 秒）",
+                        details={
+                            "cycle": cycle,
+                            "deadline": deadline_time,
+                            "wait_seconds": round(wait_secs, 3),
+                            "pool_collected": unused_count,
+                        },
+                    )
+                    self._push_runtime_message(account_id, f"ticket 池已满，等待 {deadline_time} 开始抢购…")
+                    while True:
+                        self._ensure_not_paused(account_id)
+                        remaining = self._preview_concurrency_wait_seconds(deadline_time)
+                        if remaining <= 0:
+                            break
+                        tick = 0.005 if remaining < 0.5 else 0.1
+                        time.sleep(min(tick, remaining))
+                    self.runtime_logs.log_event(
+                        flow,
+                        stage="ticket_pool_wait",
+                        status="ready",
+                        message="并发时间到，开始消耗 ticket 池",
+                        details={"cycle": cycle, "deadline": deadline_time, "pool_collected": unused_count},
+                    )
+                    self._push_runtime_message(account_id, "并发时间到，开始消耗 ticket 池抢购")
+                first_deadline_wait_done = True
+
+            try:
+                preview = self._drain_ticket_pool(
+                    account_id,
+                    current_account,
+                    session,
+                    PreviewPaymentRequest(product_id=product_id),
+                    invitation,
+                    flow=flow,
+                )
+            except UpstreamRequestError as exc:
+                if "已耗尽" not in exc.message and "为空" not in exc.message:
+                    raise
+                last_exhaustion = exc
+                self.runtime_logs.log_event(
+                    flow,
+                    stage="ticket_pool",
+                    status="refill",
+                    message="ticket 池未拿到 bizId，继续补票后再次发射",
+                    details={
+                        "cycle": cycle,
+                        "pool_size": ticket_pool_size,
+                        "reason": exc.message,
+                        "fallback_proxy_ticket_pool_only": self.settings.fallback_proxy_ticket_pool_only,
+                    },
+                    level=logging.WARNING,
+                )
+                self._push_runtime_message(account_id, f"ticket 池第 {cycle} 轮未拿到 bizId，继续补票抢购…")
+                continue
+            break
+        else:
+            raise UpstreamRequestError(
+                f"ticket 池已达到最大循环 {PREVIEW_TICKET_POOL_MAX_CYCLES} 轮，仍未拿到 bizId",
                 details={
+                    "account_id": account_id,
                     "pool_size": ticket_pool_size,
-                    "fallback_proxy_ticket_pool_only": self.settings.fallback_proxy_ticket_pool_only,
-                    "fallback_retry_uses_fallback_proxy": not self.settings.fallback_proxy_ticket_pool_only,
+                    "last_error": last_exhaustion.message if last_exhaustion is not None else "",
+                    "last_details": last_exhaustion.details if last_exhaustion is not None else {},
                 },
-                level=logging.WARNING,
-            )
-            self._push_runtime_message(account_id, "ticket 池已耗尽，切换竞速模式继续抢购…")
-            return self.race_preview_payment(
-                account_id,
-                PreviewPaymentRequest(product_id=product_id),
-                concurrency=current_account.preview_concurrency,
-                preview_concurrency_time=current_account.preview_concurrency_time
-                if current_account.preview_concurrency_time_enabled
-                else "",
-                flow=flow,
             )
 
         # Persist preview to session so create_qr can read it
         session = self.state_service.load_session(account_id)
+        session = self._prune_used_ticket_pool_entries(
+            account_id,
+            session,
+            flow=flow,
+            reason="success",
+            cycle=cycle,
+        )
         session.preview = preview
         session.selected_product_id = product_id
         self.state_service.save_session(session)

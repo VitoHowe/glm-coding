@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 import shutil
 import logging
+import threading
 from datetime import datetime, timezone
 from functools import lru_cache
 from http.cookies import SimpleCookie
@@ -49,6 +50,22 @@ class AccountStateService:
         self.settings = settings
         self.accounts_store = JsonFileStore(settings.accounts_path, default_factory=list)
         self.tasks_store = JsonFileStore(settings.tasks_path, default_factory=list)
+        self._session_stores: dict[str, JsonFileStore] = {}
+        self._session_stores_lock = threading.Lock()
+
+    def _get_session_store(self, account_id: str) -> JsonFileStore:
+        with self._session_stores_lock:
+            store = self._session_stores.get(account_id)
+            if store is None:
+                store = JsonFileStore(
+                    self._session_path(account_id),
+                    default_factory=lambda aid=account_id: AccountSessionState(
+                        account_id=aid,
+                        updated_at=utc_now_iso(),
+                    ).model_dump(),
+                )
+                self._session_stores[account_id] = store
+            return store
 
     def list_accounts(self) -> list[PublicAccountRecord]:
         accounts = [AccountRecord.model_validate(item) for item in self.accounts_store.read()]
@@ -129,6 +146,12 @@ class AccountStateService:
                         10_000,
                         int(existing.get("ticket_pool_drain_interval_ms") or 0),
                     ),
+                )
+                if existing
+                else 0,
+                preview_warmup_lead_seconds=max(
+                    0,
+                    min(120, int(existing.get("preview_warmup_lead_seconds") or 0)),
                 )
                 if existing
                 else 0,
@@ -284,6 +307,8 @@ class AccountStateService:
             account.ticket_pool_size = max(0, min(50, int(request.ticket_pool_size)))
         if request.ticket_pool_drain_interval_ms is not None:
             account.ticket_pool_drain_interval_ms = max(0, min(10_000, int(request.ticket_pool_drain_interval_ms)))
+        if request.preview_warmup_lead_seconds is not None:
+            account.preview_warmup_lead_seconds = max(0, min(120, int(request.preview_warmup_lead_seconds)))
         if self._should_skip_today_after_schedule_update(
             account=account,
             previous_schedule_enabled=previous_schedule_enabled,
@@ -328,22 +353,12 @@ class AccountStateService:
         return f"{current_date}|{(scheduled_start_time or '').strip()}"
 
     def load_session(self, account_id: str) -> AccountSessionState:
-        path = self._session_path(account_id)
-        store = JsonFileStore(
-            path,
-            default_factory=lambda: AccountSessionState(
-                account_id=account_id,
-                updated_at=utc_now_iso(),
-            ).model_dump(),
-        )
+        store = self._get_session_store(account_id)
         return AccountSessionState.model_validate(store.read())
 
     def save_session(self, session: AccountSessionState) -> AccountSessionState:
         session.updated_at = utc_now_iso()
-        store = JsonFileStore(
-            self._session_path(session.account_id),
-            default_factory=dict,
-        )
+        store = self._get_session_store(session.account_id)
         store.write(session.model_dump())
         return session
 
@@ -391,6 +406,8 @@ class AccountStateService:
         session_path = self._session_path(account_id)
         if session_path.exists():
             session_path.unlink()
+        with self._session_stores_lock:
+            self._session_stores.pop(account_id, None)
         self._remove_account_artifacts(account_id)
         get_runtime_log_service().log_account_event(
             account_id=account_id,
@@ -431,6 +448,7 @@ class AccountStateService:
             preview_concurrency_time=account.preview_concurrency_time,
             ticket_pool_size=account.ticket_pool_size,
             ticket_pool_drain_interval_ms=account.ticket_pool_drain_interval_ms,
+            preview_warmup_lead_seconds=account.preview_warmup_lead_seconds,
             invitation_code=account.invitation_code,
             stock_monitor_enabled=account.stock_monitor_enabled,
             stock_monitor_last_checked_at=account.stock_monitor_last_checked_at,

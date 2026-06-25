@@ -31,7 +31,9 @@ SENSITIVE_KEYS = {
     "randstr",
     "sign",
     "ticket",
+    "ticket_value",
     "token",
+    "randstr_value",
 }
 
 

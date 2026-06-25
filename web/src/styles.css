@@ -410,7 +410,7 @@ textarea:focus-visible,
 }
 
 .schedule-cell {
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto minmax(108px, 1fr) minmax(88px, auto);
   align-items: center;
   align-content: center;
 }
@@ -601,6 +601,29 @@ textarea:focus-visible,
   border: 1px solid var(--desk-line);
   border-radius: 12px;
   padding: 6px 10px;
+  color: var(--desk-ink);
+  background: #fff;
+}
+
+.schedule-lead-field {
+  display: grid;
+  grid-template-columns: auto minmax(46px, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 88px;
+  color: var(--desk-muted);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.schedule-lead-input {
+  min-height: 36px;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--desk-line);
+  border-radius: 12px;
+  padding: 6px 8px;
   color: var(--desk-ink);
   background: #fff;
 }
