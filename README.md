@@ -7,17 +7,17 @@ glm端午到现在都没放货哈，抢不到是正常的。可以去他们的�
 
 # AegisFlow
 
-`AegisFlow` 是一个本地运行的 `GLM Coding` 支付运营后台，用来管理多账号导入、套餐同步、自动验证码链路、预览下单、签单出二维码，以及定时启动任务。
+`AegisFlow` 是一个本地运行的 `GLM Coding` 支付运营后台，用来管理多账号导入、套餐同步、自动验证码链路、预览下单、签单出二维码，以及按启动时间定时抢购。
 
 当前页面已经不是早期的调试台，而是简约列表后台：
 
 - 顶部弹窗导入账号
 - 导入后自动同步账号上下文和套餐
 - 每个账号单独选择套餐
-- 每个账号单独配置定时启动时间
+- 每个账号单独配置启动时间（池模式额外配提前填池时间）
 - 列表直接展示最新支付二维码和价格
 - 点击账号名查看上下文
-- 支持“同步并换指纹”
+- 支持“同步账号信息”
 - 支持删除账号，并清理该账号本地缓存
 
 ## 功能概览
@@ -323,7 +323,6 @@ PROXY_WHITEIP_WAIT_SECONDS=5
 
 - 账号备注
 - Token
-- 邀请码：可选，留空使用默认邀请码
 
 注意：
 
@@ -340,8 +339,8 @@ PROXY_WHITEIP_WAIT_SECONDS=5
 - 购买模式：`新购 / 升级`
 - 当前账号指纹 profile：例如 `chrome146 / chrome145 / edge146 / firefox149`
 - 套餐下拉选择器
-- 定时启动配置
-- Ticket 池大小和发射间隔
+- 启动时间 / 提前填池配置
+- Ticket 池大小、发射间隔和提前填池
 - 账号状态
 - 最新支付二维码
 - 操作按钮
@@ -350,13 +349,12 @@ PROXY_WHITEIP_WAIT_SECONDS=5
 
 每个账号的套餐用下拉框选择，切换后自动保存到本地会话。
 
-### 4. 定时启动
+### 4. 启动时间与提前填池
 
-每个账号都可以设置是否启用定时任务，以及启动时间。
+每个账号配置一个**启动时间**（开抢时刻，`HH:MM:SS`）；开启 Ticket 池的账号还可以额外配一个**提前填池**时间。两种情况：
 
-默认时间：
-
-- `09:59:58`
+- **不开 Ticket 池**：只设启动时间。到点直接启动整条支付链路（验证码 → preview → 签单 → 出二维码）。
+- **开 Ticket 池**：设「提前填池」+「启动时间」。到「提前填池」时间开始填池攒 ticket，到「启动时间」无论池是否填满都正式启动开抢。
 
 时间格式支持：
 
@@ -379,9 +377,9 @@ Ticket 池发射间隔在 Web 端按账号设置，不再通过 `.env` 配置：
 3. 签单
 4. 生成二维码
 
-### 6. 同步并换指纹
+### 6. 同步账号信息
 
-点击 `同步并换指纹` 后，会按“换指纹 -> 同步账号上下文 -> 同步套餐”的顺序执行。
+点击 `同步账号信息` 后，会按“换指纹 -> 同步账号上下文 -> 同步套餐”的顺序执行。
 
 如果同步失败，后端会继续换下一个指纹并重试，直到同步成功或达到最大重试次数。
 
@@ -399,7 +397,7 @@ Ticket 池发射间隔在 Web 端按账号设置，不再通过 `.env` 配置：
 - `customerName`
 - 账号状态
 - 状态说明
-- 定时配置
+- 启动时间
 - 最近检查时间
 - 完整账号 / 会话 JSON
 
@@ -563,7 +561,7 @@ data/logs/runtime/
 - 服务启动 / 停止
 - OCR 预热
 - 调度器启动、轮询异常、启动检查
-- 账号导入、删除、同步并换指纹
+- 账号导入、删除、同步账号信息
 - `getCustomerInfo`
 - `/biz/pay/batch-preview`
 - 验证码获取
@@ -630,7 +628,6 @@ PROXY_WHITEIP_API=
 PROXY_WHITEIP_LIST=
 PROXY_WHITEIP_WAIT_SECONDS=5
 PROXY_POOL_MAX_LATENCY_MS=3000
-PROXY_POOL_FAST_WINDOW=32
 PROXY_POOL_FAILURE_COOLDOWN_SECONDS=60
 TENCENT_OCR_WORKERS=4
 RUNTIME_LOG_LEVEL=INFO
@@ -682,7 +679,6 @@ TENCENT_OCR_ONNX_THREADS=1
 | `PROXY_WHITEIP_LIST` | 空 | 需要加入白名单的 IP 列表；留空时由代理服务商接口自行识别当前出口 IP |
 | `PROXY_WHITEIP_WAIT_SECONDS` | `5` | 调用白名单接口后等待代理池生效的时间，单位秒 |
 | `PROXY_POOL_MAX_LATENCY_MS` | `3000` | 代理健康检测后的最大允许延迟，单位毫秒；超过该值的代理会被丢弃 |
-| `PROXY_POOL_FAST_WINDOW` | `32` | 运行时只在延迟排序最靠前的 N 个代理内轮询；小于 `1` 时不限制窗口 |
 | `PROXY_POOL_FAILURE_COOLDOWN_SECONDS` | `60` | 某个代理连接失败后的冷却时间，单位秒；冷却期内不再分配请求给该代理 |
 | `TENCENT_OCR_WORKERS` | `4` | 系统 OCR worker 数量和最大并发；服务启动时会按该值一次性预热全部 worker |
 | `RUNTIME_LOG_LEVEL` | `INFO` | 正式运行日志级别 |
@@ -697,7 +693,7 @@ TENCENT_OCR_ONNX_THREADS=1
 | `BIGMODEL_REFERER` | `https://www.bigmodel.cn/glm-coding` | BigModel 请求头 `Referer` 默认值 |
 | `DEFAULT_LANGUAGE` | `zh` | 默认请求语言，会写入 `Accept-Language` 和 `Set-Language` |
 | `BROWSER_IMPERSONATE` | `chrome146` | 全局兜底浏览器指纹 profile；账号实际请求优先用账号自己的随机 `browser_impersonate` |
-| `BOOTSTRAP_FINGERPRINT_MAX_RETRIES` | `99` | 点击“同步并换指纹”时的最大尝试次数；每轮先换一个账号级指纹，再完整同步上下文和套餐，失败才进入下一轮 |
+| `BOOTSTRAP_FINGERPRINT_MAX_RETRIES` | `99` | 点击“同步账号信息”时的最大尝试次数；每轮先换一个账号级指纹，再完整同步上下文和套餐，失败才进入下一轮 |
 | `REQUEST_TIMEOUT_SECONDS` | `20` | 上游 HTTP 请求超时时间，单位秒 |
 | `TENCENT_CAPTCHA_DOMAIN` | `https://turing.captcha.qcloud.com` | 腾讯验证码域名 |
 | `TENCENT_CAPTCHA_AID` | `196026326` | 腾讯验证码业务 `aid` |

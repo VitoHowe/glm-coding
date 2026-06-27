@@ -6,6 +6,7 @@ import type {
   HealthPayload,
   NetworkEgressMode,
   NetworkModePayload,
+  ProxyPoolSourcesPayload,
   RuntimeLogsPayload,
   PublicAccountRecord,
   TicketPoolEntry,
@@ -50,6 +51,13 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ mode }),
     }),
+  getProxyPoolSources: () =>
+    request<ProxyPoolSourcesPayload>("/api/proxy-pool/sources"),
+  saveProxyPoolSources: (content: string) =>
+    request<ProxyPoolSourcesPayload>("/api/proxy-pool/sources", {
+      method: "PUT",
+      body: JSON.stringify({ content }),
+    }),
   listAccounts: () => request<PublicAccountRecord[]>("/api/accounts"),
   getAccount: (accountId: string) =>
     request<AccountDetailResponse>(
@@ -79,10 +87,6 @@ export const api = {
     ),
   runAccount: (accountId: string) =>
     request<unknown>(`/api/accounts/${encodeURIComponent(accountId)}/run`, {
-      method: "POST",
-    }),
-  probeAccount: (accountId: string) =>
-    request<unknown>(`/api/accounts/${encodeURIComponent(accountId)}/probe`, {
       method: "POST",
     }),
   startStockMonitor: (accountId: string) =>

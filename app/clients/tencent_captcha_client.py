@@ -15,6 +15,7 @@ from app.clients.fingerprint_http import FingerprintHttpClient
 from app.config import Settings, get_settings
 from app.errors import UpstreamRequestError
 from app.models import AccountRecord
+from app.services.network_mode_service import get_network_mode_service
 
 @dataclass(frozen=True)
 class CaptchaChallenge:
@@ -56,6 +57,7 @@ class TencentCaptchaClient:
     def prehandle(self, account: AccountRecord) -> CaptchaChallenge:
         callback = f"_aq_{int(time.time() * 1000)}"
         user_agent = resolve_user_agent(account.user_agent, account.browser_impersonate)
+        allow_dynamic_proxy_channel = self._allow_dynamic_proxy_channel()
         response_text = self.http_client.request_text(
             "GET",
             f"{self.settings.tencent_captcha_domain}/cap_union_prehandle",
@@ -88,6 +90,7 @@ class TencentCaptchaClient:
                 "sess": "",
             },
             proxy_url=account.proxy_url or None,
+            allow_fallback_proxy=allow_dynamic_proxy_channel,
             user_agent=user_agent,
             browser_impersonate=account.browser_impersonate or None,
         )
@@ -116,6 +119,7 @@ class TencentCaptchaClient:
 
     def fetch_image_bytes(self, account: AccountRecord, challenge: CaptchaChallenge) -> bytes:
         user_agent = resolve_user_agent(account.user_agent, account.browser_impersonate)
+        allow_dynamic_proxy_channel = self._allow_dynamic_proxy_channel()
         return self.http_client.request_bytes(
             "GET",
             challenge.image_url,
@@ -124,6 +128,7 @@ class TencentCaptchaClient:
                 "Referer": self.settings.tencent_captcha_entry_url,
             },
             proxy_url=account.proxy_url or None,
+            allow_fallback_proxy=allow_dynamic_proxy_channel,
             user_agent=user_agent,
             browser_impersonate=account.browser_impersonate or None,
             sec_fetch_site="cross-site",
@@ -131,6 +136,7 @@ class TencentCaptchaClient:
 
     def verify(self, account: AccountRecord, payload: dict[str, Any]) -> CaptchaVerifyResult:
         user_agent = resolve_user_agent(account.user_agent, account.browser_impersonate)
+        allow_dynamic_proxy_channel = self._allow_dynamic_proxy_channel()
         form_body = {
             str(key): str(value)
             for key, value in payload.items()
@@ -148,6 +154,7 @@ class TencentCaptchaClient:
             },
             form_body=form_body,
             proxy_url=account.proxy_url or None,
+            allow_fallback_proxy=allow_dynamic_proxy_channel,
             user_agent=user_agent,
             browser_impersonate=account.browser_impersonate or None,
             sec_fetch_site="cross-site",
@@ -192,6 +199,9 @@ class TencentCaptchaClient:
                 details={"payload_type": type(payload).__name__},
             )
         return payload
+
+    def _allow_dynamic_proxy_channel(self) -> bool:
+        return get_network_mode_service().get_mode() == "dynamic_proxy"
 
 
 @lru_cache(maxsize=1)

@@ -36,7 +36,7 @@ const contextJson = computed(() => {
         <n-card :bordered="false"><span>{{ copy.contextModal.customer }}</span><strong>{{ detail.session.customer_number || "-" }}</strong></n-card>
         <n-card :bordered="false"><span>{{ copy.contextModal.name }}</span><strong>{{ detail.session.customer_name || "-" }}</strong></n-card>
         <n-card :bordered="false"><span>{{ copy.contextModal.status }}</span><strong>{{ detail.account.account_status || copy.contextModal.unchecked }}</strong></n-card>
-        <n-card :bordered="false"><span>{{ copy.contextModal.schedule }}</span><strong>{{ detail.account.schedule_enabled ? detail.account.scheduled_start_time : copy.contextModal.disabled }}</strong></n-card>
+        <n-card :bordered="false"><span>{{ copy.contextModal.startTime }}</span><strong>{{ detail.account.preview_concurrency_time || copy.contextModal.disabled }}</strong></n-card>
         <n-card :bordered="false"><span>{{ copy.contextModal.browser }}</span><strong>{{ detail.account.browser_impersonate || "-" }}</strong></n-card>
       </div>
       <n-input class="json-view" :value="contextJson" type="textarea" readonly :autosize="{ minRows: 16, maxRows: 22 }" />

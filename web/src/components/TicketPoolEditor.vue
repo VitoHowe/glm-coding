@@ -8,10 +8,12 @@ const props = defineProps<{
     drainIntervalMs: number;
     collected: number;
     target: number;
+    ticketStartTime: string;
 }>();
 
 const emit = defineEmits<{
     update: [accountId: string, enabled: boolean, size: number, drainIntervalMs: number];
+    updateTicketStartTime: [accountId: string, time: string];
     clearPool: [accountId: string];
 }>();
 
@@ -86,6 +88,19 @@ function updateDrainInterval(event: Event) {
                     :title="copy.ticketPool.intervalHint"
                     :aria-label="copy.ticketPool.intervalLabel"
                     @change="updateDrainInterval"
+                />
+            </label>
+            <label class="compact-number-field pool-start-field">
+                <span>{{ copy.ticketPool.ticketStartTimeLabel }}</span>
+                <input
+                    class="time-input"
+                    type="time"
+                    step="1"
+                    :value="ticketStartTime"
+                    :aria-label="copy.ticketPool.ticketStartTimeLabel"
+                    @change="
+                        (e: Event) => emit('updateTicketStartTime', accountId, (e.target as HTMLInputElement).value || '')
+                    "
                 />
             </label>
             <n-button

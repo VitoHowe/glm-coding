@@ -49,7 +49,7 @@ if exist web\package.json (
     )
 )
 
-rem Built-in Python proxy pool is started by FastAPI when FALLBACK_PROXY_URL points to localhost.
+rem Built-in Python proxy pool starts on demand: when the Web switches to proxy_pool mode, or on startup if the persisted mode is proxy_pool.
 set "SHOULD_START_PROXY_POOL=0"
 if not "%FALLBACK_PROXY_URL%"=="" (
     set "PROXY_CHECK=%FALLBACK_PROXY_URL:127.0.0.1:1728=%"
@@ -59,7 +59,7 @@ if not "%FALLBACK_PROXY_URL%"=="" (
 )
 
 if "%SHOULD_START_PROXY_POOL%"=="1" (
-    echo [AegisFlow] FALLBACK_PROXY_URL points to localhost; FastAPI will start the built-in Python proxy pool.
+    echo [AegisFlow] FALLBACK_PROXY_URL points to localhost; proxy pool starts on demand when switching to proxy_pool mode.
     for %%R in (17283 17284 17285 17286) do (
         for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R /C:":%%R .*LISTENING"') do (
             if not "%%P"=="" (

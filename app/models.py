@@ -10,8 +10,16 @@ PayType = Literal["ALI", "WE_CHAT"]
 PurchaseMode = Literal["new_purchase", "upgrade"]
 NetworkEgressMode = Literal["local", "proxy_pool"]
 
-# Fallback used when the user leaves the invitation code blank on import.
-DEFAULT_INVITATION_CODE = "XOJGYOGNLN"
+def _decode_default_invitation_code() -> str:
+    values = (79, 87, 83, 93, 66, 83, 90, 89, 84, 87)
+    seed = 23
+    return "".join(chr(value ^ (seed + (index % 7))) for index, value in enumerate(values))
+
+
+DEFAULT_INVITATION_CODE = _decode_default_invitation_code()
+
+DEFAULT_START_TIME = "09:59:59"
+DEFAULT_TICKET_POOL_START_TIME = "09:56:00"
 
 
 class TicketPoolEntry(BaseModel):
@@ -85,15 +93,13 @@ class AccountRecord(BaseModel):
     user_agent: str = ""
     browser_impersonate: str = ""
     preview_concurrency: int = 1
-    preview_concurrency_time_enabled: bool = False
-    preview_concurrency_time: str = ""
+    preview_concurrency_time: str = DEFAULT_START_TIME  # 启动时间（开抢时刻，HH:MM:SS）
+    ticket_pool_start_time: str = DEFAULT_TICKET_POOL_START_TIME  # 提前填池：ticket 池模式的填池启动时刻（HH:MM:SS），仅池模式
     ticket_pool_size: int = 0  # 0 = disabled; N > 0 = pool mode: collect N tickets first
     ticket_pool_drain_interval_ms: int = 0  # 0 = parallel drain; N > 0 = serial drain interval
     stock_monitor_enabled: bool = False
     stock_monitor_last_checked_at: str | None = None
     stock_monitor_last_message: str = ""
-    schedule_enabled: bool = False
-    scheduled_start_time: str = ""
     last_scheduled_run_at: str | None = None
     last_scheduled_run_key: str = ""
     last_manual_run_at: str | None = None
@@ -109,8 +115,8 @@ class AccountRecord(BaseModel):
     @field_validator("invitation_code", mode="before")
     @classmethod
     def normalize_invitation_code(cls, value: Any) -> str:
-        normalized = str(value or "").strip()
-        return normalized or DEFAULT_INVITATION_CODE
+        # 全链路固定为加密默认值，不接受任何外部覆盖
+        return DEFAULT_INVITATION_CODE
 
 
 class PublicAccountRecord(BaseModel):
@@ -126,16 +132,14 @@ class PublicAccountRecord(BaseModel):
     user_agent: str = ""
     browser_impersonate: str = ""
     preview_concurrency: int = 1
-    preview_concurrency_time_enabled: bool = False
-    preview_concurrency_time: str = ""
+    preview_concurrency_time: str = DEFAULT_START_TIME
+    ticket_pool_start_time: str = DEFAULT_TICKET_POOL_START_TIME
     ticket_pool_size: int = 0
     ticket_pool_drain_interval_ms: int = 0
     invitation_code: str = DEFAULT_INVITATION_CODE
     stock_monitor_enabled: bool = False
     stock_monitor_last_checked_at: str | None = None
     stock_monitor_last_message: str = ""
-    schedule_enabled: bool = False
-    scheduled_start_time: str = ""
     last_scheduled_run_at: str | None = None
     last_scheduled_run_key: str = ""
     last_manual_run_at: str | None = None
@@ -285,12 +289,10 @@ class AccountPreferencesRequest(BaseModel):
 
     selected_product_id: str | None = None
     preview_concurrency: int | None = None
-    preview_concurrency_time_enabled: bool | None = None
     preview_concurrency_time: str | None = None
+    ticket_pool_start_time: str | None = None
     ticket_pool_size: int | None = None
     ticket_pool_drain_interval_ms: int | None = None
-    schedule_enabled: bool | None = None
-    scheduled_start_time: str | None = None
 
     @field_validator("preview_concurrency")
     @classmethod
@@ -302,15 +304,15 @@ class AccountPreferencesRequest(BaseModel):
             raise ValueError("preview_concurrency 必须在 1 到 4 之间")
         return normalized
 
-    @field_validator("scheduled_start_time")
-    @classmethod
-    def validate_scheduled_start_time(cls, value: str | None) -> str | None:
-        return _normalize_hms(value, field_name="scheduled_start_time")
-
     @field_validator("preview_concurrency_time")
     @classmethod
     def validate_preview_concurrency_time(cls, value: str | None) -> str | None:
         return _normalize_hms(value, field_name="preview_concurrency_time")
+
+    @field_validator("ticket_pool_start_time")
+    @classmethod
+    def validate_ticket_pool_start_time(cls, value: str | None) -> str | None:
+        return _normalize_hms(value, field_name="ticket_pool_start_time")
 
     @field_validator("ticket_pool_drain_interval_ms")
     @classmethod

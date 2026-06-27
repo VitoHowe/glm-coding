@@ -106,12 +106,19 @@ class SchedulerService:
         current_hms = now.strftime("%H:%M:%S")
         current_date = now.strftime("%Y-%m-%d")
         for public_account in self.state_service.list_accounts():
-            if not public_account.schedule_enabled or not public_account.scheduled_start_time:
+            if not public_account.preview_concurrency_time:
                 continue
-            if public_account.scheduled_start_time > current_hms:
+            # 池模式按"提前填池"时间拉起填池；普通模式按"启动时间"拉起
+            launch = (
+                public_account.ticket_pool_start_time
+                if public_account.ticket_pool_size > 0
+                and public_account.ticket_pool_start_time
+                else public_account.preview_concurrency_time
+            )
+            if not launch or launch > current_hms:
                 continue
             account = self.state_service.get_account(public_account.id)
-            run_key = self._scheduled_run_key(current_date, account.scheduled_start_time)
+            run_key = self._scheduled_run_key(current_date, account.preview_concurrency_time)
             if self._already_ran_schedule(account, run_key):
                 continue
             if self._queue_scheduled_run_if_busy(account.id, run_key):
@@ -216,7 +223,7 @@ class SchedulerService:
             account.last_scheduled_run_at = utc_now_iso()
             account.last_scheduled_run_key = scheduled_run_key or self._scheduled_run_key(
                 datetime.now(SCHEDULER_TZ).strftime("%Y-%m-%d") if SCHEDULER_TZ is not None else datetime.now().astimezone().strftime("%Y-%m-%d"),
-                account.scheduled_start_time,
+                account.preview_concurrency_time,
             )
         else:
             account.last_manual_run_at = utc_now_iso()
@@ -236,7 +243,7 @@ class SchedulerService:
             stage="scheduler",
             status="started",
             message="已提交账号运行任务",
-            details={"source": source, "scheduled_start_time": account.scheduled_start_time},
+            details={"source": source, "preview_concurrency_time": account.preview_concurrency_time, "ticket_pool_start_time": account.ticket_pool_start_time},
         )
         threading.Thread(
             target=self._run_account_flow,
@@ -466,8 +473,8 @@ class SchedulerService:
             )
             return True
 
-    def _scheduled_run_key(self, current_date: str, scheduled_start_time: str) -> str:
-        return f"{current_date}|{(scheduled_start_time or '').strip()}"
+    def _scheduled_run_key(self, current_date: str, start_time: str) -> str:
+        return f"{current_date}|{(start_time or '').strip()}"
 
     def _already_ran_schedule(self, account, run_key: str) -> bool:
         return bool(run_key) and (account.last_scheduled_run_key or "").strip() == run_key
@@ -497,10 +504,10 @@ class SchedulerService:
         if not run_key:
             return
         account = self.state_service.get_account(account_id)
-        if not account.schedule_enabled:
+        if not account.preview_concurrency_time:
             return
         scheduled_date, _, _ = run_key.partition("|")
-        if run_key != self._scheduled_run_key(scheduled_date, account.scheduled_start_time):
+        if run_key != self._scheduled_run_key(scheduled_date, account.preview_concurrency_time):
             return
         if self._already_ran_schedule(account, run_key):
             return

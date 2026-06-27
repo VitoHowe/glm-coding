@@ -6,6 +6,7 @@ import AccountTable from "./components/AccountTable.vue";
 import AppShell from "./components/AppShell.vue";
 import DashboardStats from "./components/DashboardStats.vue";
 import ImportAccountModal from "./components/ImportAccountModal.vue";
+import ProxyPoolConfigModal from "./components/ProxyPoolConfigModal.vue";
 import StatusBanner from "./components/StatusBanner.vue";
 import { useDashboard } from "./composables/useDashboard";
 import { zhCN as copy } from "./locales/zhCN";
@@ -14,6 +15,7 @@ import type { AccountDetailResponse, AccountImportPayload } from "./types/api";
 
 const dashboard = useDashboard();
 const showImport = ref(false);
+const showProxyPoolConfig = ref(false);
 const showContext = ref(false);
 const showLogs = ref(false);
 const logLoading = ref(false);
@@ -22,6 +24,7 @@ const logMeta = ref("");
 const selectedDetail = ref<AccountDetailResponse | null>(null);
 
 const importing = computed(() => dashboard.actionKey.value === "import");
+const proxyPoolConfigSaving = computed(() => dashboard.actionKey.value === "proxy-pool-sources");
 
 const themeOverrides = {
     common: {
@@ -57,6 +60,11 @@ async function submitImport(payload: AccountImportPayload) {
     showImport.value = false;
 }
 
+async function submitProxyPoolSources(content: string) {
+    await dashboard.saveProxyPoolSources(content);
+    showProxyPoolConfig.value = false;
+}
+
 async function updateProduct(accountId: string, productId: string) {
     if (!productId) {
         return;
@@ -66,37 +74,21 @@ async function updateProduct(accountId: string, productId: string) {
     });
 }
 
-async function updateSchedule(
-    accountId: string,
-    enabled: boolean,
-    time: string,
-) {
-    await dashboard.updatePreferences(accountId, {
-        schedule_enabled: enabled,
-        scheduled_start_time: time,
-    });
-}
-
 async function updatePreviewConcurrency(accountId: string, value: number) {
     await dashboard.updatePreferences(accountId, {
         preview_concurrency: value,
     });
 }
 
-async function updatePreviewConcurrencyTime(accountId: string, time: string) {
+async function updateStartTime(accountId: string, time: string) {
     await dashboard.updatePreferences(accountId, {
         preview_concurrency_time: time,
     });
 }
 
-async function updatePreviewConcurrencyTimeEnabled(
-    accountId: string,
-    enabled: boolean,
-    time: string,
-) {
+async function updateTicketStartTime(accountId: string, time: string) {
     await dashboard.updatePreferences(accountId, {
-        preview_concurrency_time_enabled: enabled,
-        preview_concurrency_time: time,
+        ticket_pool_start_time: time,
     });
 }
 
@@ -126,10 +118,12 @@ async function openLogs() {
     >
         <AppShell
             :health="dashboard.health.value"
+            :network-mode-busy="dashboard.networkModeBusy.value"
             @logs="openLogs"
             @refresh="dashboard.refreshDashboard()"
             @import="showImport = true"
             @update-network-mode="dashboard.updateNetworkMode"
+            @configure-proxy-pool="showProxyPoolConfig = true"
         >
             <div class="banner-slot">
                 <StatusBanner
@@ -149,16 +143,12 @@ async function openLogs() {
                     :action-key="dashboard.actionKey.value"
                     @open-context="openContext"
                     @select-product="updateProduct"
-                    @update-schedule="updateSchedule"
                     @update-preview-concurrency="updatePreviewConcurrency"
-                    @update-preview-concurrency-time-enabled="
-                        updatePreviewConcurrencyTimeEnabled
-                    "
-                    @update-preview-concurrency-time="updatePreviewConcurrencyTime"
+                    @update-start-time="updateStartTime"
+                    @update-ticket-start-time="updateTicketStartTime"
                     @sync="dashboard.syncAccount"
                     @delete="dashboard.deleteAccount"
                     @run="dashboard.runAccount"
-                    @probe="dashboard.probeAccount"
                     @start-stock-monitor="dashboard.startStockMonitor"
                     @stop-stock-monitor="dashboard.stopStockMonitor"
                     @pause="dashboard.pauseAccount"
@@ -179,6 +169,11 @@ async function openLogs() {
             v-model:show="showImport"
             :loading="importing"
             @submit="submitImport"
+        />
+        <ProxyPoolConfigModal
+            v-model:show="showProxyPoolConfig"
+            :loading="proxyPoolConfigSaving"
+            @submit="submitProxyPoolSources"
         />
         <AccountContextModal
             v-model:show="showContext"

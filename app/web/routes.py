@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import base64
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -11,9 +12,10 @@ from typing import Any
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 from app.config import get_settings
-from app.errors import NotFoundError
+from app.errors import BadRequestError, NotFoundError
 from app.models import (
     AccountPreferencesRequest,
     AccountImportRequest,
@@ -23,6 +25,11 @@ from app.models import (
     NetworkModeRequest,
     PreviewPaymentRequest,
     PreviewSeedRequest,
+)
+from app.proxy_pool.service import (
+    get_builtin_proxy_pool_service,
+    load_proxy_pool_config,
+    resolve_config_path,
 )
 from app.services.payment_service import get_payment_service
 from app.services.network_mode_service import get_network_mode_service
@@ -69,6 +76,60 @@ def get_network_mode():
 @router.patch("/api/network-mode")
 def update_network_mode(payload: NetworkModeRequest):
     return success(get_network_mode_service().set_mode(payload.mode))
+
+
+class ProxyPoolSourcesRequest(BaseModel):
+    content: str = ""
+
+
+def _resolve_proxy_source_path() -> Path | None:
+    """返回 proxy_pool.yaml 中第一个本地代理源文件的绝对路径。"""
+    try:
+        config = load_proxy_pool_config(resolve_config_path())
+    except Exception:
+        return None
+    for source in config.proxy_list_urls:
+        if source.startswith(("http://", "https://")):
+            continue
+        candidate = Path(source).expanduser()
+        if not candidate.is_absolute():
+            candidate = config.source_base_dir / candidate
+        return candidate
+    return None
+
+
+@router.get("/api/proxy-pool/sources")
+def get_proxy_pool_sources():
+    """读取本地代理源文件内容（默认 good_proxies.txt）。"""
+    path = _resolve_proxy_source_path()
+    content = path.read_text(encoding="utf-8") if path and path.exists() else ""
+    return success(
+        {
+            "path": str(path) if path else "",
+            "exists": bool(path and path.exists()),
+            "content": content,
+        }
+    )
+
+
+@router.put("/api/proxy-pool/sources")
+def save_proxy_pool_sources(payload: ProxyPoolSourcesRequest):
+    """保存代理源；代理池在运行时后台刷新加载新代理。"""
+    path = _resolve_proxy_source_path()
+    if path is None:
+        raise BadRequestError("未找到可编辑的本地代理源：proxy_pool.yaml 未配置本地文件源")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload.content, encoding="utf-8")
+    service = get_builtin_proxy_pool_service()
+    refreshed = False
+    if service.is_started:
+        threading.Thread(
+            target=service.refresh_once,
+            name="proxy-pool-refresh-on-save",
+            daemon=True,
+        ).start()
+        refreshed = True
+    return success({"path": str(path), "refreshed": refreshed})
 
 
 @router.get("/api/logs/today")
@@ -179,13 +240,6 @@ def run_payment_flow(account_id: str):
     from app.services.scheduler_service import get_scheduler_service
 
     return success(get_scheduler_service().start_account_flow(account_id, source="manual"))
-
-
-@router.post("/api/accounts/{account_id}/probe")
-def probe_account_flow(account_id: str):
-    from app.services.scheduler_service import get_scheduler_service
-
-    return success(get_scheduler_service().start_account_flow(account_id, source="probe"))
 
 
 @router.post("/api/accounts/{account_id}/stock-monitor/start")

@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.errors import install_exception_handlers
-from app.proxy_pool.service import get_builtin_proxy_pool_service, should_auto_start_proxy_pool
+from app.proxy_pool.service import get_builtin_proxy_pool_service
 from app.runtime_logging import configure_logging, get_runtime_log_service
+from app.services.network_mode_service import get_network_mode_service
 from app.services.account_state import get_account_state_service
 from app.services.ocr_service import get_ocr_service
 from app.services.scheduler_service import get_scheduler_service
@@ -43,24 +45,28 @@ def create_app() -> FastAPI:
             message="服务启动，开始执行缓存清理、OCR 预热和调度器初始化",
         )
         get_account_state_service().clear_payment_cache()
-        if should_auto_start_proxy_pool():
-            try:
-                get_builtin_proxy_pool_service().start()
-                runtime_logs.log_system_event(
-                    stage="proxy_pool",
-                    status="started",
-                    message="内置 Python 代理池服务已启动",
-                    details=get_builtin_proxy_pool_service().status_payload(),
-                )
-            except Exception as exc:  # pragma: no cover - startup best effort
-                logger.warning("Built-in proxy pool startup failed: %s", exc)
-                runtime_logs.log_system_event(
-                    stage="proxy_pool",
-                    status="failed",
-                    message=f"内置 Python 代理池服务启动失败：{exc}",
-                    details={"error": exc.__class__.__name__},
-                    level=logging.WARNING,
-                )
+        if get_network_mode_service().get_mode() == "proxy_pool":
+            # 上次为代理池模式：后台静默拉起内置代理池服务，不阻塞启动、不做连通性检验
+            def _bootstrap_proxy_pool() -> None:
+                try:
+                    get_builtin_proxy_pool_service().start()
+                    runtime_logs.log_system_event(
+                        stage="proxy_pool",
+                        status="started",
+                        message="上次为代理池模式，后台拉起内置 Python 代理池服务",
+                        details=get_builtin_proxy_pool_service().status_payload(),
+                    )
+                except Exception as exc:  # pragma: no cover - startup best effort
+                    logger.warning("Built-in proxy pool startup failed: %s", exc)
+                    runtime_logs.log_system_event(
+                        stage="proxy_pool",
+                        status="failed",
+                        message=f"内置 Python 代理池服务启动失败：{exc}",
+                        details={"error": exc.__class__.__name__},
+                        level=logging.WARNING,
+                    )
+
+            threading.Thread(target=_bootstrap_proxy_pool, name="proxy-pool-bootstrap", daemon=True).start()
         ocr_service = get_ocr_service()
         if ocr_service.warmup_in_background():
             runtime_logs.log_system_event(
@@ -95,7 +101,7 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     def stop_scheduler() -> None:
         get_scheduler_service().stop()
-        if should_auto_start_proxy_pool():
+        if get_builtin_proxy_pool_service().is_started:
             get_builtin_proxy_pool_service().stop()
         get_ocr_service().shutdown()
         get_runtime_log_service().log_system_event(

@@ -598,10 +598,6 @@
             Token
             <textarea id="import-token" placeholder="填写 bigmodel_token_production 的值"></textarea>
           </label>
-          <label>
-            邀请码
-            <input id="import-invitation-code" autocomplete="off" placeholder="可选，留空使用默认邀请码">
-          </label>
         </form>
       </div>
       <div class="dialog-foot">
@@ -770,7 +766,6 @@
     async function handleImportAccount() {
       const label = byId("import-label").value.trim();
       const token = byId("import-token").value.trim();
-      const invitationCode = byId("import-invitation-code").value.trim();
       if (!label || !token) {
         setStatus("账号备注和 Token 都得填，别整半拉子输入。", "bad");
         return;
@@ -780,8 +775,7 @@
           method: "POST",
           body: JSON.stringify({
             label,
-            token,
-            invitation_code: invitationCode
+            token
           })
         });
         await api(`/api/accounts/${encodeURIComponent(account.id)}/bootstrap`, { method: "POST" });

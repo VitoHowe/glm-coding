@@ -5,6 +5,7 @@ import type { HealthPayload, NetworkEgressMode, NetworkModeOptionPayload } from 
 
 const props = defineProps<{
   health: HealthPayload | null;
+  networkModeBusy?: boolean;
 }>();
 
 const healthProblems = computed(() => props.health?.problems || []);
@@ -62,6 +63,7 @@ const emit = defineEmits<{
   refresh: [];
   import: [];
   "update-network-mode": [mode: NetworkEgressMode];
+  "configure-proxy-pool": [];
 }>();
 </script>
 
@@ -84,7 +86,8 @@ const emit = defineEmits<{
                   :key="option.value"
                   :type="networkMode === option.value ? 'primary' : 'default'"
                   :secondary="networkMode !== option.value"
-                  :disabled="option.disabled"
+                  :disabled="option.disabled || networkModeBusy"
+                  :loading="networkModeBusy"
                   @click="updateNetworkMode(option.value as NetworkEgressMode, option.disabled)"
                 >
                   {{ option.label }}
@@ -96,6 +99,14 @@ const emit = defineEmits<{
             <div>{{ network?.message || copy.app.transportPending }}</div>
           </div>
         </n-tooltip>
+        <n-button
+          secondary
+          size="small"
+          :disabled="networkMode !== 'proxy_pool'"
+          @click="emit('configure-proxy-pool')"
+        >
+          {{ copy.proxyPoolConfig.button }}
+        </n-button>
         <n-tooltip v-if="proxyEnabled" trigger="hover">
           <template #trigger>
             <n-tag round :type="proxyAvailable ? 'success' : 'warning'">

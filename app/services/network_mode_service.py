@@ -8,6 +8,7 @@ from typing import Any
 from app.config import get_settings
 from app.errors import BadRequestError
 from app.models import NetworkEgressMode
+from app.proxy_pool.service import get_builtin_proxy_pool_service
 from app.storage.json_store import JsonFileStore
 
 VALID_NETWORK_MODES: set[str] = {"local", "proxy_pool"}
@@ -34,11 +35,21 @@ class NetworkModeService:
         normalized = str(mode).strip()
         if normalized not in VALID_NETWORK_MODES:
             raise BadRequestError("网络出口模式不支持", details={"mode": mode})
-        status = self.status_payload(mode=normalized)
-        if not bool(status.get("available")):
-            raise BadRequestError(str(status.get("message") or "网络出口配置不可用"), details=status)
+        self._apply_mode(normalized)
         self.store.write({"mode": normalized})
         return self.status_payload()
+
+    def _apply_mode(self, mode: str) -> None:
+        """启停内置代理池服务；连通性检验由代理池后台异步完成，不阻塞切换。"""
+        service = get_builtin_proxy_pool_service()
+        if mode == "proxy_pool":
+            url = self.settings.fallback_proxy_url.strip()
+            if not url:
+                raise BadRequestError("代理池模式缺少 FALLBACK_PROXY_URL", details={"mode": mode})
+            if not service.is_started:
+                service.start()
+        elif service.is_started:
+            service.stop()
 
     def status_payload(self, *, mode: str | None = None) -> dict[str, Any]:
         active_mode = str(mode or self.get_mode()).strip()
@@ -60,10 +71,18 @@ class NetworkModeService:
             },
         }
         current = modes.get(active_mode, modes["local"])
+        if active_mode == "proxy_pool":
+            # 顶层 available 反映代理池服务真实状态（含后台连通性检验结果）
+            pool_status = get_builtin_proxy_pool_service().status_payload()
+            available = bool(pool_status.get("available"))
+            message = str(pool_status.get("message") or current.get("message") or "")
+        else:
+            available = bool(current.get("available"))
+            message = current.get("message", "")
         return {
             "mode": active_mode,
-            "available": bool(current.get("available")),
-            "message": current.get("message", ""),
+            "available": available,
+            "message": message,
             "label": current.get("label", active_mode),
             "ticket_pool_only": self.settings.fallback_proxy_ticket_pool_only,
             "modes": modes,

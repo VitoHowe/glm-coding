@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import QrPreview from "./QrPreview.vue";
-import ScheduleEditor from "./ScheduleEditor.vue";
 import TicketPoolEditor from "./TicketPoolEditor.vue";
 import { zhCN as copy } from "../locales/zhCN";
 import type {
@@ -18,18 +17,12 @@ defineProps<{
 const emit = defineEmits<{
     openContext: [detail: AccountDetailResponse];
     selectProduct: [accountId: string, productId: string];
-    updateSchedule: [accountId: string, enabled: boolean, time: string];
     updatePreviewConcurrency: [accountId: string, value: number];
-    updatePreviewConcurrencyTimeEnabled: [
-        accountId: string,
-        enabled: boolean,
-        time: string,
-    ];
-    updatePreviewConcurrencyTime: [accountId: string, time: string];
+    updateStartTime: [accountId: string, time: string];
+    updateTicketStartTime: [accountId: string, time: string];
     sync: [accountId: string];
     delete: [accountId: string];
     run: [accountId: string];
-    probe: [accountId: string];
     startStockMonitor: [accountId: string];
     stopStockMonitor: [accountId: string];
     pause: [accountId: string];
@@ -70,11 +63,8 @@ function isStockMonitoring(detail: AccountDetailResponse) {
     return Boolean(detail.account.stock_monitor_enabled);
 }
 
-function scheduleStateText(detail: AccountDetailResponse) {
-    if (!detail.account.schedule_enabled) {
-        return copy.table.scheduleDisabled;
-    }
-    return `${copy.table.scheduleEnabled} ${detail.account.scheduled_start_time || "00:00:00"}`;
+function startTimeStateText(detail: AccountDetailResponse) {
+    return detail.account.preview_concurrency_time || copy.table.notConfigured;
 }
 
 function productOptions(detail: AccountDetailResponse) {
@@ -104,29 +94,8 @@ function updatePreviewConcurrency(
     emit("updatePreviewConcurrency", accountId, value);
 }
 
-function previewConcurrencyTimeValue(detail: AccountDetailResponse) {
-    return detail.account.preview_concurrency_time || "10:00:00";
-}
-
-function previewConcurrencyTimeEnabled(detail: AccountDetailResponse) {
-    return Boolean(detail.account.preview_concurrency_time_enabled);
-}
-
-function updatePreviewConcurrencyTimeEnabled(
-    detail: AccountDetailResponse,
-    enabled: boolean,
-) {
-    emit(
-        "updatePreviewConcurrencyTimeEnabled",
-        detail.account.id,
-        enabled,
-        previewConcurrencyTimeValue(detail),
-    );
-}
-
-function updatePreviewConcurrencyTime(accountId: string, event: Event) {
-    const target = event.target as HTMLInputElement;
-    emit("updatePreviewConcurrencyTime", accountId, target.value || "10:00:00");
+function startTimeValue(detail: AccountDetailResponse) {
+    return detail.account.preview_concurrency_time || "";
 }
 
 function displayMode(detail: AccountDetailResponse) {
@@ -260,24 +229,20 @@ function onTicketPoolUpdate(
                         <div class="execution-config">
                             <div class="execution-row">
                                 <span class="config-label">{{
-                                    copy.table.executionGroups.schedule
+                                    copy.table.executionGroups.startTime
                                 }}</span>
-                                <ScheduleEditor
-                                    :account-id="detail.account.id"
-                                    :enabled="
-                                        Boolean(detail.account.schedule_enabled)
-                                    "
-                                    :time="
-                                        detail.account.scheduled_start_time ||
-                                        '00:00:00'
-                                    "
-                                    @update="
-                                        (id, enabled, time) =>
+                                <input
+                                    class="time-input"
+                                    type="time"
+                                    step="1"
+                                    :value="startTimeValue(detail)"
+                                    :aria-label="copy.table.startTimeLabel"
+                                    @change="
+                                        (e: Event) =>
                                             emit(
-                                                'updateSchedule',
-                                                id,
-                                                enabled,
-                                                time,
+                                                'updateStartTime',
+                                                detail.account.id,
+                                                (e.target as HTMLInputElement).value || '',
                                             )
                                     "
                                 />
@@ -286,91 +251,32 @@ function onTicketPoolUpdate(
                                 <span class="config-label">{{
                                     copy.table.executionGroups.preview
                                 }}</span>
-                                <div class="preview-config-grid">
-                                    <label class="preview-race-control">
-                                        <span>{{
-                                            copy.table.previewConcurrencyShort
-                                        }}</span>
-                                        <select
-                                            :value="
-                                                previewConcurrencyValue(detail)
-                                            "
-                                            :aria-label="
-                                                copy.table.previewConcurrency
-                                            "
-                                            @change="
-                                                updatePreviewConcurrency(
-                                                    detail.account.id,
-                                                    (
-                                                        $event.target as HTMLSelectElement
-                                                    ).value,
-                                                )
-                                            "
-                                        >
-                                            <option :value="1">1</option>
-                                            <option :value="2">2</option>
-                                            <option :value="3">3</option>
-                                            <option :value="4">4</option>
-                                        </select>
-                                    </label>
-                                    <div class="preview-race-time-editor">
-                                        <span class="config-inline-label">{{
-                                            copy.table
-                                                .previewConcurrencyTimeShort
-                                        }}</span>
-                                        <n-switch
-                                            :value="
-                                                previewConcurrencyTimeEnabled(
-                                                    detail,
-                                                )
-                                            "
-                                            :aria-label="
-                                                copy.table
-                                                    .previewConcurrencyTimeEnableLabel
-                                            "
-                                            @update:value="
-                                                updatePreviewConcurrencyTimeEnabled(
-                                                    detail,
-                                                    $event,
-                                                )
-                                            "
-                                        />
-                                        <input
-                                            v-if="
-                                                !previewConcurrencyTimeEnabled(
-                                                    detail,
-                                                )
-                                            "
-                                            class="time-input"
-                                            type="time"
-                                            step="1"
-                                            :value="
-                                                previewConcurrencyTimeValue(
-                                                    detail,
-                                                )
-                                            "
-                                            :aria-label="
-                                                copy.table
-                                                    .previewConcurrencyTime
-                                            "
-                                            @change="
-                                                updatePreviewConcurrencyTime(
-                                                    detail.account.id,
-                                                    $event,
-                                                )
-                                            "
-                                        />
-                                        <span
-                                            v-else
-                                            class="schedule-time-readonly"
-                                            >{{
-                                                previewConcurrencyTimeValue(
-                                                    detail,
-                                                )
-                                            }}</span
-                                        >
-                                    </div>
-                                </div>
+                                <label class="preview-race-control">
+                                    <span>{{
+                                        copy.table.previewConcurrencyShort
+                                    }}</span>
+                                    <select
+                                        :value="
+                                            previewConcurrencyValue(detail)
+                                        "
+                                        :aria-label="
+                                            copy.table.previewConcurrency
+                                        "
+                                        @change="
+                                            updatePreviewConcurrency(
+                                                detail.account.id,
+                                                (
+                                                    $event.target as HTMLSelectElement
+                                                ).value,
+                                            )
+                                        "
+                                    >
+                                        <option :value="1">1</option>
+                                        <option :value="2">2</option>
+                                        <option :value="3">3</option>
+                                        <option :value="4">4</option>
+                                    </select>
+                                </label>
                             </div>
                             <div class="execution-row">
                                 <span class="config-label">{{
@@ -385,7 +291,14 @@ function onTicketPoolUpdate(
                                     "
                                     :collected="ticketPoolCollected(detail)"
                                     :target="ticketPoolTarget(detail)"
+                                    :ticket-start-time="
+                                        detail.account.ticket_pool_start_time || ''
+                                    "
                                     @update="onTicketPoolUpdate"
+                                    @update-ticket-start-time="
+                                        (id, time) =>
+                                            emit('updateTicketStartTime', id, time)
+                                    "
                                     @clear-pool="
                                         emit('clearTicketPool', $event)
                                     "
@@ -427,8 +340,8 @@ function onTicketPoolUpdate(
                             {{ detail.account.stock_monitor_last_message }}
                         </small>
                         <small class="schedule-state-line"
-                            >{{ copy.table.scheduleState }}:
-                            {{ scheduleStateText(detail) }}</small
+                            >{{ copy.table.startTimeLabel }}:
+                            {{ startTimeStateText(detail) }}</small
                         >
                         <small
                             v-if="
@@ -470,19 +383,6 @@ function onTicketPoolUpdate(
                                     ? copy.table.pause
                                     : copy.table.run
                             }}
-                        </n-button>
-                        <n-button
-                            secondary
-                            :loading="
-                                actionLoading(
-                                    'probe',
-                                    detail.account.id,
-                                    actionKey,
-                                )
-                            "
-                            @click="emit('probe', detail.account.id)"
-                        >
-                            {{ copy.table.probe }}
                         </n-button>
                         <n-button
                             secondary

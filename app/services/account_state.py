@@ -22,6 +22,8 @@ from app.models import (
     AccountRecord,
     AccountSessionState,
     DEFAULT_INVITATION_CODE,
+    DEFAULT_START_TIME,
+    DEFAULT_TICKET_POOL_START_TIME,
     PaymentTaskRecord,
     PublicAccountRecord,
 )
@@ -29,7 +31,6 @@ from app.runtime_logging import get_runtime_log_service
 from app.storage.json_store import JsonFileStore
 
 TOKEN_COOKIE_KEY = "bigmodel_token_production"
-DEFAULT_SCHEDULED_START_TIME = "09:59:58"
 DEFAULT_PREVIEW_CONCURRENCY = 1
 MAX_PREVIEW_CONCURRENCY = 4
 
@@ -120,8 +121,8 @@ class AccountStateService:
                 user_agent=request.user_agent.strip(),
                 browser_impersonate=browser_impersonate,
                 preview_concurrency=_clamp_preview_concurrency(existing.get("preview_concurrency") if existing else 1),
-                preview_concurrency_time_enabled=bool(existing.get("preview_concurrency_time_enabled")) if existing else False,
-                preview_concurrency_time=str(existing.get("preview_concurrency_time") or "") if existing else "",
+                preview_concurrency_time=str(existing.get("preview_concurrency_time") or DEFAULT_START_TIME) if existing else DEFAULT_START_TIME,
+                ticket_pool_start_time=str(existing.get("ticket_pool_start_time") or DEFAULT_TICKET_POOL_START_TIME) if existing else DEFAULT_TICKET_POOL_START_TIME,
                 ticket_pool_size=max(0, int(existing.get("ticket_pool_size") or 0)) if existing else 0,
                 ticket_pool_drain_interval_ms=max(
                     0,
@@ -135,8 +136,6 @@ class AccountStateService:
                 stock_monitor_enabled=bool(existing.get("stock_monitor_enabled")) if existing else False,
                 stock_monitor_last_checked_at=existing.get("stock_monitor_last_checked_at") if existing else None,
                 stock_monitor_last_message=str(existing.get("stock_monitor_last_message") or "") if existing else "",
-                schedule_enabled=bool(existing.get("schedule_enabled")) if existing else False,
-                scheduled_start_time=str(existing.get("scheduled_start_time") or DEFAULT_SCHEDULED_START_TIME) if existing else DEFAULT_SCHEDULED_START_TIME,
                 last_scheduled_run_at=existing.get("last_scheduled_run_at") if existing else None,
                 last_scheduled_run_key=str(existing.get("last_scheduled_run_key") or "") if existing else "",
                 last_manual_run_at=existing.get("last_manual_run_at") if existing else None,
@@ -177,11 +176,9 @@ class AccountStateService:
                 "label": account.label,
                 "browser_impersonate": account.browser_impersonate,
                 "has_cookie_header": bool(account.cookie_header),
-                "schedule_enabled": account.schedule_enabled,
-                "scheduled_start_time": account.scheduled_start_time,
                 "preview_concurrency": account.preview_concurrency,
-                "preview_concurrency_time_enabled": account.preview_concurrency_time_enabled,
                 "preview_concurrency_time": account.preview_concurrency_time,
+                "ticket_pool_start_time": account.ticket_pool_start_time,
                 "invitation_code": account.invitation_code,
             },
         )
@@ -265,67 +262,55 @@ class AccountStateService:
     def update_preferences(self, account_id: str, request: AccountPreferencesRequest) -> AccountDetailResponse:
         account = self.get_account(account_id)
         session = self.load_session(account_id)
-        previous_schedule_enabled = account.schedule_enabled
-        previous_scheduled_start_time = account.scheduled_start_time
+        previous_start_time = account.preview_concurrency_time
 
-        if request.schedule_enabled is not None:
-            account.schedule_enabled = bool(request.schedule_enabled)
-        if request.scheduled_start_time is not None:
-            account.scheduled_start_time = request.scheduled_start_time.strip() or DEFAULT_SCHEDULED_START_TIME
         if request.selected_product_id is not None:
             session.selected_product_id = request.selected_product_id.strip()
         if request.preview_concurrency is not None:
             account.preview_concurrency = _clamp_preview_concurrency(request.preview_concurrency)
-        if request.preview_concurrency_time_enabled is not None:
-            account.preview_concurrency_time_enabled = bool(request.preview_concurrency_time_enabled)
         if request.preview_concurrency_time is not None:
             account.preview_concurrency_time = request.preview_concurrency_time.strip()
+        if request.ticket_pool_start_time is not None:
+            account.ticket_pool_start_time = request.ticket_pool_start_time.strip()
         if request.ticket_pool_size is not None:
             account.ticket_pool_size = max(0, min(50, int(request.ticket_pool_size)))
         if request.ticket_pool_drain_interval_ms is not None:
             account.ticket_pool_drain_interval_ms = max(0, min(10_000, int(request.ticket_pool_drain_interval_ms)))
-        if self._should_skip_today_after_schedule_update(
+        if self._should_skip_today_after_start_time_update(
             account=account,
-            previous_schedule_enabled=previous_schedule_enabled,
-            previous_scheduled_start_time=previous_scheduled_start_time,
+            previous_start_time=previous_start_time,
             request=request,
         ):
             current_date, _ = self._current_schedule_date_time()
-            account.last_scheduled_run_key = self._scheduled_run_key(current_date, account.scheduled_start_time)
+            account.last_scheduled_run_key = self._scheduled_run_key(current_date, account.preview_concurrency_time)
 
         self.update_account(account, touch_updated_at=False)
         self.save_session(session)
         return self.get_account_detail(account_id)
 
-    def _should_skip_today_after_schedule_update(
+    def _should_skip_today_after_start_time_update(
         self,
         *,
         account: AccountRecord,
-        previous_schedule_enabled: bool,
-        previous_scheduled_start_time: str,
+        previous_start_time: str,
         request: AccountPreferencesRequest,
     ) -> bool:
-        if not account.schedule_enabled or not account.scheduled_start_time:
+        """改了启动时间且今天的拉起时刻已过时，标记今天已跑，避免改完立刻误触发。"""
+        if not account.preview_concurrency_time:
             return False
-        schedule_touched = request.schedule_enabled is not None or request.scheduled_start_time is not None
-        if not schedule_touched:
+        if request.preview_concurrency_time is None:
             return False
-        enabled_now = request.schedule_enabled is True and not previous_schedule_enabled
-        time_changed = (
-            request.scheduled_start_time is not None
-            and account.scheduled_start_time != (previous_scheduled_start_time or "")
-        )
-        if not enabled_now and not time_changed:
+        if account.preview_concurrency_time == (previous_start_time or ""):
             return False
         _, current_hms = self._current_schedule_date_time()
-        return account.scheduled_start_time <= current_hms
+        return account.preview_concurrency_time <= current_hms
 
     def _current_schedule_date_time(self) -> tuple[str, str]:
         now = datetime.now(SCHEDULE_TZ) if SCHEDULE_TZ is not None else datetime.now().astimezone()
         return now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")
 
-    def _scheduled_run_key(self, current_date: str, scheduled_start_time: str) -> str:
-        return f"{current_date}|{(scheduled_start_time or '').strip()}"
+    def _scheduled_run_key(self, current_date: str, start_time: str) -> str:
+        return f"{current_date}|{(start_time or '').strip()}"
 
     def load_session(self, account_id: str) -> AccountSessionState:
         path = self._session_path(account_id)
@@ -427,16 +412,14 @@ class AccountStateService:
             user_agent=account.user_agent,
             browser_impersonate=resolve_browser_impersonate(account.browser_impersonate),
             preview_concurrency=account.preview_concurrency,
-            preview_concurrency_time_enabled=account.preview_concurrency_time_enabled,
             preview_concurrency_time=account.preview_concurrency_time,
+            ticket_pool_start_time=account.ticket_pool_start_time,
             ticket_pool_size=account.ticket_pool_size,
             ticket_pool_drain_interval_ms=account.ticket_pool_drain_interval_ms,
             invitation_code=account.invitation_code,
             stock_monitor_enabled=account.stock_monitor_enabled,
             stock_monitor_last_checked_at=account.stock_monitor_last_checked_at,
             stock_monitor_last_message=account.stock_monitor_last_message,
-            schedule_enabled=account.schedule_enabled,
-            scheduled_start_time=account.scheduled_start_time,
             last_scheduled_run_at=account.last_scheduled_run_at,
             last_scheduled_run_key=account.last_scheduled_run_key,
             last_manual_run_at=account.last_manual_run_at,

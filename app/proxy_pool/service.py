@@ -83,7 +83,6 @@ class RuntimeProxyConfig:
     whiteip_list: str = ""
     whiteip_wait_seconds: int = 5
     max_latency_ms: int = 3000
-    fast_window: int = 32
     failure_cooldown_seconds: int = 60
 
 
@@ -120,14 +119,12 @@ class ProxyPool:
         self._proxies: list[UpstreamProxy] = []
         self._cooldown_until: dict[str, float] = {}
         self._index = 0
-        self._window = 0
 
-    def update(self, proxies: list[UpstreamProxy], *, fast_window: int) -> None:
+    def update(self, proxies: list[UpstreamProxy]) -> None:
         now = time.time()
         with self._lock:
             old_count = len(self._proxies)
             self._proxies = list(proxies)
-            self._window = int(fast_window)
             valid_keys = {proxy.raw for proxy in self._proxies}
             self._cooldown_until = {
                 key: until
@@ -136,21 +133,11 @@ class ProxyPool:
             }
             self._index = 0
             logger.info(
-                "[%s] Proxy pool updated: %d -> %d active proxies (fast_window=%d)",
+                "[%s] Proxy pool updated: %d -> %d active proxies",
                 self.name,
                 old_count,
                 len(self._proxies),
-                self.active_window,
             )
-
-    @property
-    def active_window(self) -> int:
-        with self._lock:
-            if not self._proxies:
-                return 0
-            if self._window <= 0 or self._window > len(self._proxies):
-                return len(self._proxies)
-            return self._window
 
     @property
     def count(self) -> int:
@@ -180,16 +167,7 @@ class ProxyPool:
                 raise RuntimeError("no available proxies")
 
             now = time.time()
-            window = self.active_window
-            for _ in range(window):
-                proxy = self._proxies[self._index % window]
-                self._index += 1
-                until = self._cooldown_until.get(proxy.raw)
-                if until is None or until <= now:
-                    self._cooldown_until.pop(proxy.raw, None)
-                    return proxy
-
-            logger.warning("[%s] Fast window is cooling down; falling back to full pool", self.name)
+            # 全池按延迟顺序轮询，跳过冷却中的代理
             for _ in range(len(self._proxies)):
                 proxy = self._proxies[self._index % len(self._proxies)]
                 self._index += 1
@@ -198,6 +176,7 @@ class ProxyPool:
                     self._cooldown_until.pop(proxy.raw, None)
                     return proxy
 
+            # 全池都在冷却，返回轮询到的下一个（即使它正在冷却）
             proxy = self._proxies[self._index % len(self._proxies)]
             self._index += 1
             return proxy
@@ -507,17 +486,11 @@ class BuiltinProxyPoolService:
                 raise RuntimeError("no proxies fetched from any source")
             result = health_check_proxies(proxies, self.config, self.runtime)
             if result["strict"]:
-                self.strict_pool.update(
-                    [item.proxy for item in result["strict"]],
-                    fast_window=self.runtime.fast_window,
-                )
+                self.strict_pool.update([item.proxy for item in result["strict"]])
             else:
                 logger.warning("[STRICT] No healthy proxies found; keeping existing pool")
             if result["relaxed"]:
-                self.relaxed_pool.update(
-                    [item.proxy for item in result["relaxed"]],
-                    fast_window=self.runtime.fast_window,
-                )
+                self.relaxed_pool.update([item.proxy for item in result["relaxed"]])
             else:
                 logger.warning("[RELAXED] No healthy proxies found; keeping existing pool")
             self._last_refresh_at = time.time()
@@ -555,7 +528,7 @@ class BuiltinProxyPoolService:
             return "Python 代理池服务未启动"
         if self._last_refresh_error:
             return f"Python 代理池暂无可用代理：{self._last_refresh_error}"
-        return f"Python 代理池已启动，{mode} 池正在加载代理"
+        return f"Python 代理池已启动，{mode} 池正在后台检验连通性"
 
     def _mode_for_port(self, port: int | None) -> str:
         if port is None:
@@ -696,7 +669,6 @@ def load_runtime_proxy_config() -> RuntimeProxyConfig:
         whiteip_list=getenv("PROXY_WHITEIP_LIST"),
         whiteip_wait_seconds=getenv_int("PROXY_WHITEIP_WAIT_SECONDS", 5),
         max_latency_ms=getenv_int("PROXY_POOL_MAX_LATENCY_MS", 3000),
-        fast_window=getenv_int("PROXY_POOL_FAST_WINDOW", 32),
         failure_cooldown_seconds=getenv_int("PROXY_POOL_FAILURE_COOLDOWN_SECONDS", 60),
     )
 
@@ -1176,11 +1148,6 @@ def is_local_proxy_url(proxy_url: str) -> bool:
     parsed = urlparse(proxy_url)
     host = (parsed.hostname or "").lower()
     return parsed.scheme in {"http", "socks5", "socks5h"} and host in LOCAL_PROXY_HOSTS and bool(parsed.port)
-
-
-def should_auto_start_proxy_pool() -> bool:
-    settings = get_settings()
-    return bool(settings.fallback_proxy_url.strip()) and is_local_proxy_url(settings.fallback_proxy_url)
 
 
 @lru_cache(maxsize=1)
